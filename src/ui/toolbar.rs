@@ -1,0 +1,485 @@
+use egui::{self, Key, RichText, ScrollArea, Ui};
+
+use crate::app::App;
+use crate::log_entry::LogLevel;
+use crate::pane::PaneId;
+use super::theme::*;
+
+pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
+    let is_dark = ui.visuals().dark_mode;
+    let toolbar_bg = if is_dark { OD_BG_LIGHT } else { OL_BG_LIGHT };
+
+    let toolbar_frame = egui::Frame::new()
+        .fill(toolbar_bg)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .corner_radius(4.0);
+
+    toolbar_frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_height(TOOLBAR_HEIGHT);
+            ui.spacing_mut().item_spacing.x = 8.0;
+
+            let pane = match app.panes.get_mut(&pane_id) {
+                Some(p) => p,
+                None => return,
+            };
+
+            // Device selector
+            let device_label = pane.device.as_ref()
+                .and_then(|serial| {
+                    app.devices.iter().find(|d| d.serial == *serial)
+                        .map(|d| d.friendly_name())
+                })
+                .unwrap_or_else(|| "No device".to_string());
+
+            ui.label(RichText::new("📱").size(14.0));
+            egui::ComboBox::from_id_salt("device_combo")
+                .selected_text(&device_label)
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for dev in &app.devices {
+                        let is_selected = pane.device.as_ref() == Some(&dev.serial);
+                        if ui.selectable_label(is_selected, dev.friendly_name()).clicked() {
+                            pane.stop_logcat();
+                            pane.clear();
+                            pane.device = Some(dev.serial.clone());
+                            pane.pid_filter = None;
+                            pane.filter.package = None;
+                            pane.packages.clear();
+                            pane.package_filter_text.clear();
+                            pane.start_logcat(&app.rt);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("↻ Refresh devices").clicked() {
+                        app.device_refresh_pending = true;
+                    }
+                });
+
+            if ui.add(egui::Button::new(RichText::new("📡").size(14.0)))
+                .on_hover_text("Wireless debugging")
+                .clicked()
+            {
+                app.show_wireless_dialog = true;
+            }
+
+            ui.separator();
+
+            // Package filter
+            ui.label(RichText::new("📦").size(14.0));
+            let pkg_hint = pane.filter.package.as_deref().unwrap_or("Package...");
+            let pkg_resp = ui.add(
+                egui::TextEdit::singleline(&mut pane.package_filter_text)
+                    .desired_width(120.0)
+                    .hint_text(pkg_hint)
+                    .id(ui.id().with("pkg_input"))
+            );
+
+            if pkg_resp.gained_focus() && pane.packages.is_empty() && pane.device.is_some() {
+                pane.package_refresh_pending = true;
+                pane.pkg_selection_index = -1;
+            }
+
+            if pkg_resp.changed() {
+                pane.pkg_selection_index = 0;
+            }
+
+            let popup_id = ui.id().with("pkg_popup");
+            let has_focus = pkg_resp.has_focus();
+            let just_lost_focus = pkg_resp.lost_focus();
+            let filter_text = pane.package_filter_text.to_lowercase();
+
+            // Build matching packages list always (needed for Enter after lost_focus)
+            let matching: Vec<String> = if filter_text.is_empty() {
+                pane.packages.iter().take(20).cloned().collect()
+            } else {
+                pane.packages.iter()
+                    .filter(|p| p.to_lowercase().contains(&filter_text))
+                    .take(15)
+                    .cloned()
+                    .collect()
+            };
+
+            // Handle arrow keys while text field has focus
+            if has_focus && !matching.is_empty() {
+                let pressed_down = ui.input(|i| i.key_pressed(Key::ArrowDown));
+                let pressed_up = ui.input(|i| i.key_pressed(Key::ArrowUp));
+
+                if pressed_down {
+                    pane.pkg_selection_index = ((pane.pkg_selection_index + 1) as usize % matching.len()) as i32;
+                }
+                if pressed_up {
+                    if pane.pkg_selection_index <= 0 {
+                        pane.pkg_selection_index = matching.len() as i32 - 1;
+                    } else {
+                        pane.pkg_selection_index -= 1;
+                    }
+                }
+            }
+
+            // Enter selects: singleline TextEdit loses focus on Enter, so detect that
+            if just_lost_focus && ui.input(|i| i.key_pressed(Key::Enter)) && !matching.is_empty() {
+                let idx = if pane.pkg_selection_index >= 0 {
+                    pane.pkg_selection_index as usize
+                } else {
+                    0
+                };
+                if idx < matching.len() {
+                    let pkg = matching[idx].clone();
+                    pane.filter.package = Some(pkg.clone());
+                    pane.package_filter_text = pkg;
+                    pane.pkg_selection_index = -1;
+                    pane.package_refresh_pending = true;
+                }
+            }
+
+            if has_focus && !matching.is_empty() {
+                let sel_idx = pane.pkg_selection_index;
+                egui::popup_below_widget(ui, popup_id, &pkg_resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                    ui.set_min_width(250.0);
+                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        if ui.selectable_label(false, RichText::new("✕ Clear filter").color(OD_FG_DIM)).clicked() {
+                            pane.filter.package = None;
+                            pane.pid_filter = None;
+                            pane.package_filter_text.clear();
+                            pane.pkg_selection_index = -1;
+                            pane.rebuild_filtered();
+                        }
+                        ui.separator();
+                        for (i, pkg) in matching.iter().enumerate() {
+                            let is_kb_selected = sel_idx >= 0 && i == sel_idx as usize;
+                            let is_current = pane.filter.package.as_ref() == Some(pkg);
+                            let label = if is_kb_selected {
+                                RichText::new(pkg).strong()
+                            } else {
+                                RichText::new(pkg)
+                            };
+                            if ui.selectable_label(is_current || is_kb_selected, label).clicked() {
+                                pane.filter.package = Some(pkg.clone());
+                                pane.package_filter_text = pkg.clone();
+                                pane.pkg_selection_index = -1;
+                                pane.package_refresh_pending = true;
+                            }
+                        }
+                    });
+                });
+                ui.memory_mut(|m| m.open_popup(popup_id));
+            }
+
+            if pkg_resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                pane.filter.package = None;
+                pane.pid_filter = None;
+                pane.package_filter_text.clear();
+                pane.pkg_selection_index = -1;
+                pane.rebuild_filtered();
+                pkg_resp.surrender_focus();
+            }
+
+            ui.separator();
+
+            // Log level selector
+            let current_level = pane.filter.min_level;
+            egui::ComboBox::from_id_salt("level_combo")
+                .selected_text(
+                    RichText::new(format!("≥ {}", current_level.label()))
+                        .color(current_level.color())
+                )
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for level in LogLevel::ALL {
+                        if ui.selectable_label(
+                            pane.filter.min_level == level,
+                            RichText::new(level.label()).color(level.color()),
+                        ).clicked() {
+                            pane.filter.min_level = level;
+                            pane.rebuild_filtered();
+                        }
+                    }
+                });
+
+            // Right-aligned: entry count + scroll-to-bottom + pause + clear
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+
+                if ui.add(egui::Button::new(RichText::new("🗑").size(15.0)))
+                    .on_hover_text("Clear logs")
+                    .clicked()
+                {
+                    pane.clear();
+                }
+
+                let pause_icon = if pane.paused {
+                    RichText::new("▶").size(15.0).color(OD_GREEN)
+                } else {
+                    RichText::new("⏸").size(15.0)
+                };
+                if ui.add(egui::Button::new(pause_icon))
+                    .on_hover_text(if pane.paused { "Resume" } else { "Pause" })
+                    .clicked()
+                {
+                    pane.paused = !pane.paused;
+                }
+
+                // Scroll-to-bottom / follow button with active state
+                let follow_color = if pane.auto_scroll {
+                    if is_dark { OD_CYAN } else { OL_BLUE }
+                } else {
+                    if is_dark { OD_FG_DIM } else { OL_FG_DIM }
+                };
+                let follow_btn = egui::Button::new(
+                    RichText::new("⤓").size(15.0).color(follow_color)
+                );
+                if ui.add(follow_btn)
+                    .on_hover_text(if pane.auto_scroll { "Following logs (click to stop)" } else { "Scroll to bottom & follow" })
+                    .clicked()
+                {
+                    if pane.auto_scroll {
+                        pane.auto_scroll = false;
+                    } else {
+                        pane.auto_scroll = true;
+                        pane.scroll_to_bottom = true;
+                    }
+                }
+
+                ui.separator();
+
+                let total = pane.entries.len();
+                let filtered = pane.filtered_indices.len();
+                let count_text = if filtered == total {
+                    format!("{total} lines")
+                } else {
+                    format!("{filtered} of {total}")
+                };
+                ui.label(
+                    RichText::new(count_text)
+                        .size(11.0)
+                        .color(OD_FG_DIM)
+                        .monospace()
+                );
+            });
+        });
+    });
+}
+
+pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
+    let is_dark = ui.visuals().dark_mode;
+    let bar_bg = if is_dark { OD_BG_LIGHT } else { OL_BG_LIGHT };
+
+    let bar_frame = egui::Frame::new()
+        .fill(bar_bg)
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .corner_radius(4.0);
+
+    let mut save_expr: Option<String> = None;
+    let mut apply_history: Option<String> = None;
+    let mut clear_tags = false;
+    let mut apply_suggestion: Option<String> = None;
+
+    bar_frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_height(24.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+
+            ui.label(RichText::new("🏷").size(13.0));
+
+            let (mut tag_input, has_filters, seen_tags) = {
+                let pane = match app.panes.get(&pane_id) {
+                    Some(p) => p,
+                    None => return,
+                };
+                (pane.tag_input.clone(), !pane.filter.tag_filters.is_empty(), pane.seen_tags.clone())
+            };
+
+            let prev_tag = app.panes.get(&pane_id).map(|p| p.prev_tag_input.clone()).unwrap_or_default();
+
+            let tag_resp = ui.add(
+                egui::TextEdit::singleline(&mut tag_input)
+                    .desired_width(ui.available_width() - 100.0)
+                    .hint_text("tag:Name  tag-:Exclude  tag~:Regex")
+                    .id(ui.id().with("tag_input"))
+            );
+
+            let text_changed = tag_input != prev_tag;
+            if let Some(pane) = app.panes.get_mut(&pane_id) {
+                pane.tag_input = tag_input.clone();
+                if text_changed {
+                    pane.prev_tag_input = tag_input.clone();
+                    pane.tag_suggestion_index = 0;
+                    pane.apply_tag_filter();
+                }
+            }
+
+            let suggestion_popup_id = ui.id().with("tag_suggest_popup");
+            let tag_has_focus = tag_resp.has_focus();
+            let tag_just_lost_focus = tag_resp.lost_focus();
+
+            let suggestions_list: Vec<String> = if !tag_input.is_empty() {
+                let partial = extract_partial_tag_value(&tag_input);
+                if !partial.is_empty() {
+                    let partial_lower = partial.to_lowercase();
+                    seen_tags.iter()
+                        .filter(|t| t.to_lowercase().contains(&partial_lower) && t.to_lowercase() != partial_lower)
+                        .take(10)
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            if tag_has_focus && !suggestions_list.is_empty() {
+                let pane = app.panes.get_mut(&pane_id).unwrap();
+                let pressed_down = ui.input(|i| i.key_pressed(Key::ArrowDown));
+                let pressed_up = ui.input(|i| i.key_pressed(Key::ArrowUp));
+
+                if pressed_down {
+                    pane.tag_suggestion_index = ((pane.tag_suggestion_index + 1) as usize % suggestions_list.len()) as i32;
+                }
+                if pressed_up {
+                    if pane.tag_suggestion_index <= 0 {
+                        pane.tag_suggestion_index = suggestions_list.len() as i32 - 1;
+                    } else {
+                        pane.tag_suggestion_index -= 1;
+                    }
+                }
+            }
+
+            if tag_just_lost_focus && ui.input(|i| i.key_pressed(Key::Enter)) {
+                if !suggestions_list.is_empty() {
+                    let idx = app.panes.get(&pane_id).map(|p| p.tag_suggestion_index).unwrap_or(0);
+                    let sel = if idx >= 0 && (idx as usize) < suggestions_list.len() {
+                        idx as usize
+                    } else {
+                        0
+                    };
+                    apply_suggestion = Some(suggestions_list[sel].clone());
+                    if let Some(pane) = app.panes.get_mut(&pane_id) {
+                        pane.tag_suggestion_index = -1;
+                    }
+                } else {
+                    save_expr = Some(tag_input.clone());
+                }
+            }
+
+            if tag_has_focus && !suggestions_list.is_empty() {
+                let sel_idx = app.panes.get(&pane_id).map(|p| p.tag_suggestion_index).unwrap_or(-1);
+                egui::popup_below_widget(ui, suggestion_popup_id, &tag_resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                    ui.set_min_width(200.0);
+                    for (i, tag) in suggestions_list.iter().enumerate() {
+                        let is_kb_selected = sel_idx >= 0 && i == sel_idx as usize;
+                        let label = if is_kb_selected {
+                            RichText::new(tag).strong()
+                        } else {
+                            RichText::new(tag)
+                        };
+                        if ui.selectable_label(is_kb_selected, label).clicked() {
+                            apply_suggestion = Some(tag.clone());
+                        }
+                    }
+                });
+                ui.memory_mut(|m| m.open_popup(suggestion_popup_id));
+            }
+
+            // History dropdown
+            let history_popup_id = ui.id().with("tag_history_popup");
+            let history_btn = ui.button(RichText::new("▾").size(13.0))
+                .on_hover_text("Tag history");
+            if history_btn.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(history_popup_id));
+            }
+
+            let history_clone = app.tag_history.clone();
+            egui::popup_below_widget(ui, history_popup_id, &history_btn, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                ui.set_min_width(300.0);
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    if history_clone.is_empty() {
+                        ui.label(RichText::new("No history yet").color(OD_FG_DIM).size(12.0));
+                    } else {
+                        for entry in &history_clone {
+                            if ui.selectable_label(false, entry).clicked() {
+                                apply_history = Some(entry.clone());
+                            }
+                        }
+                    }
+                });
+            });
+
+            let show_clear = !tag_input.is_empty() || has_filters;
+            if show_clear {
+                if ui.small_button(RichText::new("✕").size(12.0))
+                    .on_hover_text("Clear tag filters")
+                    .clicked()
+                {
+                    clear_tags = true;
+                }
+            }
+        });
+    });
+
+    // Apply deferred actions
+    if let Some(expr) = save_expr {
+        app.save_tag_to_history(&expr);
+    }
+    if let Some(hist) = apply_history {
+        if let Some(pane) = app.panes.get_mut(&pane_id) {
+            pane.tag_input = hist;
+            pane.prev_tag_input = pane.tag_input.clone();
+            pane.apply_tag_filter();
+        }
+    }
+    if clear_tags {
+        if let Some(pane) = app.panes.get_mut(&pane_id) {
+            pane.tag_input.clear();
+            pane.prev_tag_input.clear();
+            pane.filter.tag_filters.clear();
+            pane.rebuild_filtered();
+        }
+    }
+    if let Some(suggested_tag) = apply_suggestion {
+        if let Some(pane) = app.panes.get_mut(&pane_id) {
+            replace_partial_tag_value(&mut pane.tag_input, &suggested_tag);
+            pane.prev_tag_input = pane.tag_input.clone();
+            pane.apply_tag_filter();
+        }
+    }
+}
+
+fn extract_partial_tag_value(input: &str) -> &str {
+    let prefixes = ["tag-:", "tag~:", "tag:"];
+    let mut last_prefix_end = None;
+
+    for prefix in &prefixes {
+        if let Some(pos) = input.rfind(prefix) {
+            let end = pos + prefix.len();
+            if last_prefix_end.map_or(true, |prev| end > prev) {
+                last_prefix_end = Some(end);
+            }
+        }
+    }
+
+    match last_prefix_end {
+        Some(end) => &input[end..],
+        None => "",
+    }
+}
+
+fn replace_partial_tag_value(input: &mut String, replacement: &str) {
+    let prefixes = ["tag-:", "tag~:", "tag:"];
+    let mut last_prefix_end = None;
+
+    for prefix in &prefixes {
+        if let Some(pos) = input.rfind(prefix) {
+            let end = pos + prefix.len();
+            if last_prefix_end.map_or(true, |prev| end > prev) {
+                last_prefix_end = Some(end);
+            }
+        }
+    }
+
+    if let Some(end) = last_prefix_end {
+        input.truncate(end);
+        input.push_str(replacement);
+    }
+}
