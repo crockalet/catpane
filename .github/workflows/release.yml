@@ -93,6 +93,10 @@ jobs:
   publish-release:
     needs: [release-meta, build-macos]
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_REPOSITORY: ${{ secrets.HOMEBREW_TAP_REPOSITORY }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_BRANCH: ${{ secrets.HOMEBREW_TAP_BRANCH }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -122,11 +126,8 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" --generate-notes --title "$RELEASE_TAG"
           fi
       - name: Publish Homebrew tap
-        if: ${{ secrets.HOMEBREW_TAP_REPOSITORY != '' && secrets.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != '' }}
         env:
           CASK_SOURCE: ${{ github.workspace }}/dist/homebrew/Casks/catpane.rb
-          HOMEBREW_TAP_REPOSITORY: ${{ secrets.HOMEBREW_TAP_REPOSITORY }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          HOMEBREW_TAP_BRANCH: ${{ secrets.HOMEBREW_TAP_BRANCH }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
         run: scripts/publish-homebrew-tap.sh
