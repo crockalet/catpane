@@ -119,11 +119,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 };
 
                 let mut job = egui::text::LayoutJob::default();
-                job.append(
-                    &format!("{} ", entry.timestamp),
-                    0.0,
-                    fmt(ts_color),
-                );
+                job.append(&format!("{} ", entry.timestamp), 0.0, fmt(ts_color));
                 job.append(
                     &format!("{} ", entry.level.as_char()),
                     0.0,
@@ -161,7 +157,19 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 );
                 let entry_msg = entry.message.clone();
                 row_resp.context_menu(|ui| {
-                    build_context_menu(ui, pane_id, fi, &pane.filtered_indices, &pane.entries, &pane.selection_anchor, &pane.selection_end, &entry_tag, &entry_line, &entry_msg, &mut pending_tag_action);
+                    build_context_menu(
+                        ui,
+                        pane_id,
+                        fi,
+                        &pane.filtered_indices,
+                        &pane.entries,
+                        &pane.selection_anchor,
+                        &pane.selection_end,
+                        &entry_tag,
+                        &entry_line,
+                        &entry_msg,
+                        &mut pending_tag_action,
+                    );
                 });
             }
         });
@@ -287,7 +295,19 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 );
                 let entry_msg = entry.message.clone();
                 row_resp.context_menu(|ui| {
-                    build_context_menu(ui, pane_id, fi, &pane.filtered_indices, &pane.entries, &pane.selection_anchor, &pane.selection_end, &entry_tag, &entry_line, &entry_msg, &mut pending_tag_action);
+                    build_context_menu(
+                        ui,
+                        pane_id,
+                        fi,
+                        &pane.filtered_indices,
+                        &pane.entries,
+                        &pane.selection_anchor,
+                        &pane.selection_end,
+                        &entry_tag,
+                        &entry_line,
+                        &entry_msg,
+                        &mut pending_tag_action,
+                    );
                 });
             }
         });
@@ -389,9 +409,16 @@ fn build_context_menu(
         ui.close_menu();
     }
     ui.separator();
-    ui.label(RichText::new(format!("Tag: {}", entry_tag)).strong().size(12.0));
+    ui.label(
+        RichText::new(format!("Tag: {}", entry_tag))
+            .strong()
+            .size(12.0),
+    );
     ui.separator();
-    if ui.button(format!("Include tag:\"{}\"", entry_tag)).clicked() {
+    if ui
+        .button(format!("Include tag:\"{}\"", entry_tag))
+        .clicked()
+    {
         *pending_tag_action = Some(TagAction {
             pane_id,
             tag: entry_tag.to_string(),
@@ -399,7 +426,10 @@ fn build_context_menu(
         });
         ui.close_menu();
     }
-    if ui.button(format!("Exclude tag-:\"{}\"", entry_tag)).clicked() {
+    if ui
+        .button(format!("Exclude tag-:\"{}\"", entry_tag))
+        .clicked()
+    {
         *pending_tag_action = Some(TagAction {
             pane_id,
             tag: entry_tag.to_string(),

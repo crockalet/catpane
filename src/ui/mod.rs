@@ -78,9 +78,7 @@ fn draw_node(ui: &mut Ui, app: &mut App, snap: &TreeSnap) {
         }
         TreeSnap::Split { dir, first, second } => {
             let split_key = egui::Id::new(("split_ratio", first_leaf_id(snap)));
-            let ratio: f32 = ui
-                .ctx()
-                .data(|d| d.get_temp(split_key).unwrap_or(0.5_f32));
+            let ratio: f32 = ui.ctx().data(|d| d.get_temp(split_key).unwrap_or(0.5_f32));
             let is_dark = ui.visuals().dark_mode;
 
             let div_normal = if is_dark { OD_BG_HL } else { OL_BORDER };
@@ -97,10 +95,8 @@ fn draw_node(ui: &mut Ui, app: &mut App, snap: &TreeSnap) {
                     let first_w = (usable * ratio).clamp(50.0, usable - 50.0);
                     let second_w = usable - first_w;
 
-                    let first_rect = egui::Rect::from_min_size(
-                        avail_rect.min,
-                        Vec2::new(first_w, avail.y),
-                    );
+                    let first_rect =
+                        egui::Rect::from_min_size(avail_rect.min, Vec2::new(first_w, avail.y));
                     let div_rect = egui::Rect::from_min_size(
                         avail_rect.min + Vec2::new(first_w, 0.0),
                         Vec2::new(DIVIDER_SIZE, avail.y),
@@ -112,13 +108,18 @@ fn draw_node(ui: &mut Ui, app: &mut App, snap: &TreeSnap) {
 
                     let div_id = ui.id().with(("vdiv", first_leaf_id(snap)));
                     let div_resp = ui.interact(div_rect, div_id, egui::Sense::drag());
-                    let color = if div_resp.hovered() || div_resp.dragged() { div_active } else { div_normal };
+                    let color = if div_resp.hovered() || div_resp.dragged() {
+                        div_active
+                    } else {
+                        div_normal
+                    };
                     ui.painter().rect_filled(div_rect, 0.0, color);
                     if div_resp.hovered() || div_resp.dragged() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
                     if div_resp.dragged() {
-                        let new_ratio = ((first_w + div_resp.drag_delta().x) / usable).clamp(0.1, 0.9);
+                        let new_ratio =
+                            ((first_w + div_resp.drag_delta().x) / usable).clamp(0.1, 0.9);
                         ui.ctx().data_mut(|d| d.insert_temp(split_key, new_ratio));
                     }
 
@@ -133,10 +134,8 @@ fn draw_node(ui: &mut Ui, app: &mut App, snap: &TreeSnap) {
                     let first_h = (usable * ratio).clamp(50.0, usable - 50.0);
                     let second_h = usable - first_h;
 
-                    let first_rect = egui::Rect::from_min_size(
-                        avail_rect.min,
-                        Vec2::new(avail.x, first_h),
-                    );
+                    let first_rect =
+                        egui::Rect::from_min_size(avail_rect.min, Vec2::new(avail.x, first_h));
                     let div_rect = egui::Rect::from_min_size(
                         avail_rect.min + Vec2::new(0.0, first_h),
                         Vec2::new(avail.x, DIVIDER_SIZE),
@@ -148,13 +147,18 @@ fn draw_node(ui: &mut Ui, app: &mut App, snap: &TreeSnap) {
 
                     let div_id = ui.id().with(("hdiv", first_leaf_id(snap)));
                     let div_resp = ui.interact(div_rect, div_id, egui::Sense::drag());
-                    let color = if div_resp.hovered() || div_resp.dragged() { div_active } else { div_normal };
+                    let color = if div_resp.hovered() || div_resp.dragged() {
+                        div_active
+                    } else {
+                        div_normal
+                    };
                     ui.painter().rect_filled(div_rect, 0.0, color);
                     if div_resp.hovered() || div_resp.dragged() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     }
                     if div_resp.dragged() {
-                        let new_ratio = ((first_h + div_resp.drag_delta().y) / usable).clamp(0.1, 0.9);
+                        let new_ratio =
+                            ((first_h + div_resp.drag_delta().y) / usable).clamp(0.1, 0.9);
                         ui.ctx().data_mut(|d| d.insert_temp(split_key, new_ratio));
                     }
 

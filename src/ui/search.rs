@@ -49,9 +49,7 @@ pub fn draw_search_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             }
 
             // Enter / Shift+Enter: navigate matches while keeping focus
-            if search_resp.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-            {
+            if search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let shift = ui.input(|i| i.modifiers.shift);
                 let target = if shift {
                     pane.search_prev()

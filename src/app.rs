@@ -168,17 +168,22 @@ impl App {
 
     pub fn spawn_new_window(&self) {
         let exe = std::env::current_exe().unwrap_or_default();
-        let exe_str = exe.to_string_lossy().to_string();
 
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("open")
-                .args(["-na", &exe_str])
-                .spawn();
+            if let Some(app_bundle) = macos_app_bundle_for_executable(&exe) {
+                let _ = std::process::Command::new("open")
+                    .args(["-na"])
+                    .arg(app_bundle)
+                    .spawn();
+            } else {
+                let _ = std::process::Command::new(&exe).spawn();
+            }
         }
 
         #[cfg(target_os = "linux")]
         {
+            let exe_str = exe.to_string_lossy().to_string();
             for term in &["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
                 if std::process::Command::new(term)
                     .args(["-e", &exe_str])
@@ -192,6 +197,7 @@ impl App {
 
         #[cfg(target_os = "windows")]
         {
+            let exe_str = exe.to_string_lossy().to_string();
             let _ = std::process::Command::new("cmd")
                 .args(["/c", "start", &exe_str])
                 .spawn();
@@ -401,4 +407,24 @@ fn dirs_fallback() -> std::path::PathBuf {
     } else {
         std::path::PathBuf::from(".")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_bundle_for_executable(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+
+    let app_dir = contents_dir.parent()?;
+    if app_dir.extension()? != std::ffi::OsStr::new("app") {
+        return None;
+    }
+
+    Some(app_dir.to_path_buf())
 }

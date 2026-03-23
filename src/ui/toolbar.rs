@@ -263,7 +263,9 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 if is_dark { OD_FG_DIM } else { OL_FG_DIM }
             };
             if ui
-                .add(egui::Button::new(RichText::new("⤓").size(15.0).color(follow_color)))
+                .add(egui::Button::new(
+                    RichText::new("⤓").size(15.0).color(follow_color),
+                ))
                 .on_hover_text(if pane.auto_scroll {
                     "Following logs (click to stop)"
                 } else {
@@ -286,8 +288,14 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 if is_dark { OD_FG_DIM } else { OL_FG_DIM }
             };
             if ui
-                .add(egui::Button::new(RichText::new("⏎").size(15.0).color(wrap_color)))
-                .on_hover_text(if pane.word_wrap { "Word wrap on (click to disable)" } else { "Word wrap off (click to enable)" })
+                .add(egui::Button::new(
+                    RichText::new("⏎").size(15.0).color(wrap_color),
+                ))
+                .on_hover_text(if pane.word_wrap {
+                    "Word wrap on (click to disable)"
+                } else {
+                    "Word wrap off (click to enable)"
+                })
                 .clicked()
             {
                 pane.word_wrap = !pane.word_wrap;

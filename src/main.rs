@@ -19,6 +19,7 @@ use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
 const VISIBLE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 const PID_REPOLL_INTERVAL: Duration = Duration::from_secs(5);
+const APP_NAME: &str = "CatPane";
 
 /// Update `app.devices` and reconcile any pane whose saved serial is no longer
 /// present (e.g. an mDNS serial replaced by an IP:port serial after dedup).
@@ -539,12 +540,12 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 700.0])
-            .with_title("catpane"),
+            .with_title(APP_NAME),
         ..Default::default()
     };
 
     eframe::run_native(
-        "catpane",
+        APP_NAME,
         options,
         Box::new(move |_cc| {
             #[cfg(target_os = "macos")]

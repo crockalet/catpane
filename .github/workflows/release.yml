@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to build and publish (for example v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-meta:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - id: meta
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_tag="${RAW_TAG}"
+          if [[ "${release_tag}" != v* ]]; then
+            release_tag="v${release_tag}"
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    runs-on: macos-14
+    needs: release-meta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate Cargo.toml version
+        env:
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+          import os
+          cargo_version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          release_version = os.environ["RELEASE_VERSION"]
+          if cargo_version != release_version:
+              raise SystemExit(f"Cargo.toml version {cargo_version} does not match release version {release_version}")
+          PY
+      - name: Run tests
+        run: cargo test
+
+  build-macos:
+    needs: [release-meta, verify]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            arch: arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Package macOS app bundle
+        env:
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: scripts/package-macos-app.sh
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/${{ matrix.arch }}/*.zip
+            dist/macos/${{ matrix.arch }}/*.sha256
+          if-no-files-found: error
+
+  publish-release:
+    needs: [release-meta, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+      - name: Render Homebrew cask
+        env:
+          DIST_DIR: ${{ github.workspace }}/dist/artifacts
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+        run: scripts/render-homebrew-cask.sh
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-meta.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          assets=(
+            dist/artifacts/**/*.zip
+            dist/artifacts/**/*.sha256
+            dist/homebrew/Casks/catpane.rb
+          )
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --generate-notes --title "$RELEASE_TAG"
+          fi
+      - name: Publish Homebrew tap
+        if: ${{ secrets.HOMEBREW_TAP_REPOSITORY != '' && secrets.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          CASK_SOURCE: ${{ github.workspace }}/dist/homebrew/Casks/catpane.rb
+          HOMEBREW_TAP_REPOSITORY: ${{ secrets.HOMEBREW_TAP_REPOSITORY }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_BRANCH: ${{ secrets.HOMEBREW_TAP_BRANCH }}
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+        run: scripts/publish-homebrew-tap.sh
