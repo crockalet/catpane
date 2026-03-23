@@ -22,12 +22,16 @@ cask "catpane" do
     strategy :github_latest
   end
 
-  depends_on formula: "android-platform-tools"
-
   app "CatPane.app"
 
   zap trash: [
     "~/.config/catpane/session.json",
     "~/.config/catpane/tag_history.txt",
   ]
+
+  caveats <<~EOS
+    `adb` is required at runtime.
+    Install it with:
+      brew install --cask android-platform-tools
+  EOS
 end

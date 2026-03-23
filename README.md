@@ -31,6 +31,16 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 - [ADB](https://developer.android.com/tools/adb) (Android Debug Bridge) in your PATH
 - Rust 2024 edition (1.85+)
 
+## Install with Homebrew
+
+```sh
+brew tap crockalet/catpane
+brew install --cask crockalet/catpane/catpane
+brew install --cask android-platform-tools
+```
+
+CatPane needs `adb` at runtime, so install `android-platform-tools` as well if you do not already have it.
+
 ## Build & Run
 
 ```sh
