@@ -94,6 +94,7 @@ jobs:
     needs: [release-meta, build-macos]
     runs-on: ubuntu-latest
     env:
+      CASK_OUTPUT_PATH: ${{ github.workspace }}/dist/artifacts/homebrew/Casks/catpane.rb
       HOMEBREW_TAP_REPOSITORY: ${{ secrets.HOMEBREW_TAP_REPOSITORY }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       HOMEBREW_TAP_BRANCH: ${{ secrets.HOMEBREW_TAP_BRANCH }}
@@ -105,7 +106,6 @@ jobs:
       - name: Render Homebrew cask
         env:
           DIST_DIR: ${{ github.workspace }}/dist/artifacts
-          OUTPUT_PATH: ${{ github.workspace }}/dist/homebrew/Casks/catpane.rb
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
         run: scripts/render-homebrew-cask.sh
@@ -119,7 +119,7 @@ jobs:
           assets=(
             dist/artifacts/**/*.zip
             dist/artifacts/**/*.sha256
-            dist/homebrew/Casks/catpane.rb
+            "$CASK_OUTPUT_PATH"
           )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
@@ -129,6 +129,6 @@ jobs:
       - name: Publish Homebrew tap
         if: ${{ env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != '' }}
         env:
-          CASK_SOURCE: ${{ github.workspace }}/dist/homebrew/Casks/catpane.rb
+          CASK_SOURCE: ${{ env.CASK_OUTPUT_PATH }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
         run: scripts/publish-homebrew-tap.sh
