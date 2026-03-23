@@ -105,6 +105,7 @@ jobs:
       - name: Render Homebrew cask
         env:
           DIST_DIR: ${{ github.workspace }}/dist/artifacts
+          OUTPUT_PATH: ${{ github.workspace }}/dist/homebrew/Casks/catpane.rb
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
         run: scripts/render-homebrew-cask.sh
