@@ -1,6 +1,6 @@
 use crate::adb::{self, LogcatHandle};
 use crate::filter::Filter;
-use crate::log_entry::{parse_logcat_line, LogEntry};
+use crate::log_entry::{LogEntry, parse_logcat_line};
 
 const MAX_LOG_ENTRIES: usize = 50_000;
 
@@ -93,9 +93,7 @@ impl PaneNode {
     pub fn depth(&self) -> usize {
         match self {
             PaneNode::Leaf(_) => 0,
-            PaneNode::Split { first, second, .. } => {
-                1 + first.depth().max(second.depth())
-            }
+            PaneNode::Split { first, second, .. } => 1 + first.depth().max(second.depth()),
         }
     }
 
@@ -103,12 +101,16 @@ impl PaneNode {
     pub fn depth_of(&self, target: PaneId) -> Option<usize> {
         match self {
             PaneNode::Leaf(id) => {
-                if *id == target { Some(0) } else { None }
+                if *id == target {
+                    Some(0)
+                } else {
+                    None
+                }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.depth_of(target).map(|d| d + 1)
-                    .or_else(|| second.depth_of(target).map(|d| d + 1))
-            }
+            PaneNode::Split { first, second, .. } => first
+                .depth_of(target)
+                .map(|d| d + 1)
+                .or_else(|| second.depth_of(target).map(|d| d + 1)),
         }
     }
 }
@@ -139,12 +141,25 @@ pub struct Pane {
     pub tag_suggestion_index: i32,
     // All unique tags seen in this session
     pub seen_tags: Vec<String>,
+    // Scroll to a specific filtered index (set by search navigation)
+    pub scroll_to_fi: Option<usize>,
+    // Request focus on the search text input (set on Cmd+F)
+    pub search_focus_requested: bool,
     // Row selection (filtered indices) — supports range via shift-click
     pub selection_anchor: Option<usize>,
     pub selection_end: Option<usize>,
     // Packages for this pane's device
     pub packages: Vec<String>,
     pub package_refresh_pending: bool,
+    // Timestamp of the last pid-only re-poll (to detect package restarts)
+    pub last_pid_poll: std::time::Instant,
+    // Display options
+    pub word_wrap: bool,
+    // Scroll offset managed by us (not egui's id-based state) to survive
+    // pane tree restructures that change the ScrollArea's internal id.
+    pub scroll_offset_y: f32,
+    // Cooldown for auto-restart of dead logcat (avoid rapid-fire respawn loops)
+    pub last_logcat_restart: std::time::Instant,
 }
 
 impl Pane {
@@ -157,7 +172,8 @@ impl Pane {
     }
 
     pub fn is_row_selected(&self, fi: usize) -> bool {
-        self.selected_range().is_some_and(|(lo, hi)| fi >= lo && fi <= hi)
+        self.selected_range()
+            .is_some_and(|(lo, hi)| fi >= lo && fi <= hi)
     }
 
     pub fn new(device: Option<String>) -> Self {
@@ -182,10 +198,16 @@ impl Pane {
             pkg_selection_index: -1,
             tag_suggestion_index: -1,
             seen_tags: Vec::new(),
+            scroll_to_fi: None,
+            search_focus_requested: false,
             selection_anchor: None,
             selection_end: None,
             packages: Vec::new(),
             package_refresh_pending: false,
+            last_pid_poll: std::time::Instant::now(),
+            word_wrap: false,
+            scroll_offset_y: 0.0,
+            last_logcat_restart: std::time::Instant::now(),
         }
     }
 
@@ -198,6 +220,7 @@ impl Pane {
         }
 
         let mut added = false;
+        let mut channel_dead = false;
         if let Some(ref mut handle) = self.logcat_handle {
             for _ in 0..500 {
                 match handle.rx.try_recv() {
@@ -216,9 +239,19 @@ impl Pane {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        channel_dead = true;
+                        break;
+                    }
                 }
             }
+        }
+
+        // Logcat process exited — drop the dead handle so the update loop
+        // can detect this and restart when the device is available.
+        if channel_dead {
+            self.logcat_handle = None;
         }
 
         if added && self.auto_scroll {
@@ -244,14 +277,13 @@ impl Pane {
             if self.filter.matches(entry, self.pid_filter) {
                 self.filtered_indices.push(i);
                 if self.search_open && self.filter.matches_search(entry) {
-                    self.search_match_indices.push(self.filtered_indices.len() - 1);
+                    self.search_match_indices
+                        .push(self.filtered_indices.len() - 1);
                 }
             }
         }
 
-        if self.auto_scroll {
-            self.scroll_to_bottom = true;
-        }
+        self.scroll_to_bottom = true;
     }
 
     pub fn update_search(&mut self) {
@@ -268,13 +300,17 @@ impl Pane {
     }
 
     pub fn search_next(&mut self) -> Option<usize> {
-        if self.search_match_indices.is_empty() { return None; }
+        if self.search_match_indices.is_empty() {
+            return None;
+        }
         self.search_current = (self.search_current + 1) % self.search_match_indices.len();
         Some(self.search_match_indices[self.search_current])
     }
 
     pub fn search_prev(&mut self) -> Option<usize> {
-        if self.search_match_indices.is_empty() { return None; }
+        if self.search_match_indices.is_empty() {
+            return None;
+        }
         if self.search_current == 0 {
             self.search_current = self.search_match_indices.len() - 1;
         } else {
@@ -298,6 +334,7 @@ impl Pane {
         self.stop_logcat();
         if let Some(ref device) = self.device {
             self.logcat_handle = Some(adb::spawn_logcat(rt, device.clone(), self.pid_filter));
+            self.last_logcat_restart = std::time::Instant::now();
         }
     }
 

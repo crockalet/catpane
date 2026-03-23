@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use crate::adb::AdbDevice;
 use crate::log_entry::LogLevel;
 use crate::pane::{Pane, PaneId, PaneNode, SplitDir};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use egui;
 
@@ -32,12 +32,18 @@ struct SessionPane {
     tag_input: String,
     min_level: LogLevel,
     hide_vendor_noise: bool,
+    #[serde(default)]
+    word_wrap: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 enum SessionTree {
     Leaf(usize), // index into panes vec
-    Split { dir: String, first: Box<SessionTree>, second: Box<SessionTree> },
+    Split {
+        dir: String,
+        first: Box<SessionTree>,
+        second: Box<SessionTree>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,7 +125,9 @@ impl App {
             return;
         }
 
-        let device = self.panes.get(&self.focused_pane)
+        let device = self
+            .panes
+            .get(&self.focused_pane)
             .and_then(|p| p.device.clone())
             .or_else(|| self.devices.first().map(|d| d.serial.clone()));
 
@@ -133,7 +141,9 @@ impl App {
     }
 
     pub fn close_pane(&mut self, id: PaneId) {
-        if self.pane_tree.count() <= 1 { return; }
+        if self.pane_tree.count() <= 1 {
+            return;
+        }
         if let Some(mut pane) = self.panes.remove(&id) {
             pane.stop_logcat();
         }
@@ -146,8 +156,13 @@ impl App {
 
     pub fn cycle_focus(&mut self) {
         let ids = self.pane_tree.pane_ids();
-        if ids.is_empty() { return; }
-        let pos = ids.iter().position(|&id| id == self.focused_pane).unwrap_or(0);
+        if ids.is_empty() {
+            return;
+        }
+        let pos = ids
+            .iter()
+            .position(|&id| id == self.focused_pane)
+            .unwrap_or(0);
         self.focused_pane = ids[(pos + 1) % ids.len()];
     }
 
@@ -165,7 +180,11 @@ impl App {
         #[cfg(target_os = "linux")]
         {
             for term in &["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
-                if std::process::Command::new(term).args(["-e", &exe_str]).spawn().is_ok() {
+                if std::process::Command::new(term)
+                    .args(["-e", &exe_str])
+                    .spawn()
+                    .is_ok()
+                {
                     break;
                 }
             }
@@ -181,7 +200,9 @@ impl App {
 
     pub fn save_tag_to_history(&mut self, tag_expr: &str) {
         let tag_expr = tag_expr.trim().to_string();
-        if tag_expr.is_empty() { return; }
+        if tag_expr.is_empty() {
+            return;
+        }
         self.tag_history.retain(|t| t != &tag_expr);
         self.tag_history.insert(0, tag_expr);
         if self.tag_history.len() > TAG_HISTORY_MAX {
@@ -228,18 +249,26 @@ impl App {
 
     pub fn save_session(&self) {
         let pane_ids = self.pane_tree.pane_ids();
-        let id_to_idx: HashMap<PaneId, usize> = pane_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let id_to_idx: HashMap<PaneId, usize> = pane_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
 
-        let session_panes: Vec<SessionPane> = pane_ids.iter().filter_map(|id| {
-            let pane = self.panes.get(id)?;
-            Some(SessionPane {
-                device: pane.device.clone(),
-                package: pane.filter.package.clone(),
-                tag_input: pane.tag_input.clone(),
-                min_level: pane.filter.min_level,
-                hide_vendor_noise: pane.filter.hide_vendor_noise,
+        let session_panes: Vec<SessionPane> = pane_ids
+            .iter()
+            .filter_map(|id| {
+                let pane = self.panes.get(id)?;
+                Some(SessionPane {
+                    device: pane.device.clone(),
+                    package: pane.filter.package.clone(),
+                    tag_input: pane.tag_input.clone(),
+                    min_level: pane.filter.min_level,
+                    hide_vendor_noise: pane.filter.hide_vendor_noise,
+                    word_wrap: pane.word_wrap,
+                })
             })
-        }).collect();
+            .collect();
 
         let tree = Self::tree_to_session(&self.pane_tree, &id_to_idx);
         let focused_idx = id_to_idx.get(&self.focused_pane).copied().unwrap_or(0);
@@ -274,7 +303,9 @@ impl App {
 
         for sp in &session.panes {
             // If saved device isn't available, fall back to first available
-            let device = sp.device.as_ref()
+            let device = sp
+                .device
+                .as_ref()
                 .filter(|serial| devices.iter().any(|d| &d.serial == *serial))
                 .cloned()
                 .or_else(|| devices.first().map(|d| d.serial.clone()));
@@ -286,7 +317,11 @@ impl App {
             pane.tag_input = sp.tag_input.clone();
             pane.prev_tag_input = sp.tag_input.clone();
             pane.package_filter_text = sp.package.clone().unwrap_or_default();
+            pane.word_wrap = sp.word_wrap;
             pane.apply_tag_filter();
+            if sp.package.is_some() {
+                pane.package_refresh_pending = true;
+            }
             pane.start_logcat(rt);
 
             pane_ids.push(pane.id);
@@ -294,7 +329,10 @@ impl App {
         }
 
         let tree = Self::session_to_tree(&session.tree, &pane_ids)?;
-        let focused = pane_ids.get(session.focused).copied().unwrap_or(pane_ids[0]);
+        let focused = pane_ids
+            .get(session.focused)
+            .copied()
+            .unwrap_or(pane_ids[0]);
 
         let device_tracker = Some(crate::adb::spawn_device_tracker(rt));
 
@@ -338,7 +376,11 @@ impl App {
                 Some(PaneNode::Leaf(id))
             }
             SessionTree::Split { dir, first, second } => {
-                let split_dir = if dir == "h" { SplitDir::Horizontal } else { SplitDir::Vertical };
+                let split_dir = if dir == "h" {
+                    SplitDir::Horizontal
+                } else {
+                    SplitDir::Vertical
+                };
                 Some(PaneNode::Split {
                     dir: split_dir,
                     first: Box::new(Self::session_to_tree(first, pane_ids)?),

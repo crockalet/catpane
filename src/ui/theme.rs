@@ -1,7 +1,6 @@
 use egui::{self, Color32, FontData, FontDefinitions, FontFamily, Vec2};
 
 // Layout constants
-pub const TOOLBAR_HEIGHT: f32 = 26.0;
 pub const LOG_ROW_HEIGHT: f32 = 18.0;
 
 // OneDark Dark palette
@@ -34,15 +33,24 @@ pub fn configure_fonts(ctx: &egui::Context, is_dark: bool) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
         "JetBrainsMono".to_owned(),
-        FontData::from_static(include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")).into(),
+        FontData::from_static(include_bytes!(
+            "../../assets/fonts/JetBrainsMono-Regular.ttf"
+        ))
+        .into(),
     );
     fonts.font_data.insert(
         "JetBrainsMono-Bold".to_owned(),
         FontData::from_static(include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf")).into(),
     );
-    fonts.families.entry(FontFamily::Monospace).or_default()
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
         .insert(0, "JetBrainsMono".to_owned());
-    fonts.families.entry(FontFamily::Proportional).or_default()
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
         .insert(0, "JetBrainsMono".to_owned());
     ctx.set_fonts(fonts);
 
@@ -60,13 +68,20 @@ pub fn configure_fonts(ctx: &egui::Context, is_dark: bool) {
         visuals.code_bg_color = OD_BG_LIGHT;
         visuals.selection.bg_fill = OD_BG_HL;
         visuals.selection.stroke = egui::Stroke::new(1.0, OD_BLUE);
-        for w in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive] {
+        for w in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+        ] {
             w.bg_fill = OD_BG_LIGHT;
             w.weak_bg_fill = OD_BG_LIGHT;
             w.fg_stroke = egui::Stroke::new(1.0, OD_FG);
             w.bg_stroke = egui::Stroke::new(1.0, OD_BG_HL);
         }
-        for w in [&mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
+        for w in [
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
             w.bg_fill = OD_BG_HL;
             w.weak_bg_fill = OD_BG_HL;
             w.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
@@ -82,13 +97,20 @@ pub fn configure_fonts(ctx: &egui::Context, is_dark: bool) {
         visuals.faint_bg_color = OL_BG_LIGHT;
         visuals.selection.bg_fill = Color32::from_rgb(195, 215, 255);
         visuals.selection.stroke = egui::Stroke::new(1.0, OL_BLUE);
-        for w in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive] {
+        for w in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+        ] {
             w.bg_fill = OL_BG_LIGHT;
             w.weak_bg_fill = OL_BG_LIGHT;
             w.fg_stroke = egui::Stroke::new(1.0, OL_FG);
             w.bg_stroke = egui::Stroke::new(1.0, OL_BORDER);
         }
-        for w in [&mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
+        for w in [
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
             w.bg_fill = OL_BG_HL;
             w.weak_bg_fill = OL_BG_HL;
             w.fg_stroke = egui::Stroke::new(1.0, OL_FG);

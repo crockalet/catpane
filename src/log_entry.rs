@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum LogLevel {
     Verbose,
     Debug,
@@ -102,12 +104,22 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
     let level = LogLevel::from_char(level_str.chars().next()?)?;
 
     let (tag, message) = if let Some(colon_pos) = rest.find(": ") {
-        (rest[..colon_pos].trim().to_string(), rest[colon_pos + 2..].to_string())
+        (
+            rest[..colon_pos].trim().to_string(),
+            rest[colon_pos + 2..].to_string(),
+        )
     } else {
         (rest.trim().to_string(), String::new())
     };
 
-    Some(LogEntry { timestamp, pid, tid, level, tag, message })
+    Some(LogEntry {
+        timestamp,
+        pid,
+        tid,
+        level,
+        tag,
+        message,
+    })
 }
 
 fn split_first_whitespace(s: &str) -> Option<(&str, &str)> {

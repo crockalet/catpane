@@ -1,5 +1,5 @@
-use regex::Regex;
 use crate::log_entry::{LogEntry, LogLevel};
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub enum TagFilter {
@@ -20,21 +20,50 @@ pub struct Filter {
 
 // Common vendor/system tags that flood logcat and are irrelevant to app developers
 const VENDOR_TAGS: &[&str] = &[
-    "chatty", "hwservicemanager", "ServiceManager", "HidlServiceManagement",
-    "SELinux", "storaged", "Zygote", "ActivityThread", "gralloc",
-    "BufferQueueProducer", "GraphicBufferSource", "SurfaceFlinger",
-    "InputDispatcher", "InputReader", "InputTransport",
-    "MediaCodec", "OMXClient", "PlatformConfig",
-    "SensorService", "SensorManager",
-    "netd", "resolv", "DnsProxyListener",
-    "cutils-trace", "Looper", "PropertyManager",
-    "vndksupport", "linker", "libc",
-    "StatusBarIconController", "PhoneStatusBarPolicy",
-    "cnss-daemon", "wificond", "WifiHAL",
-    "audit", "thermal_repeater", "ThermalEngine",
-    "adbd", "usbd",
-    "lowmemorykiller", "lmkd",
-    "perfetto", "traced_probes", "traced",
+    "chatty",
+    "hwservicemanager",
+    "ServiceManager",
+    "HidlServiceManagement",
+    "SELinux",
+    "storaged",
+    "Zygote",
+    "ActivityThread",
+    "gralloc",
+    "BufferQueueProducer",
+    "GraphicBufferSource",
+    "SurfaceFlinger",
+    "InputDispatcher",
+    "InputReader",
+    "InputTransport",
+    "MediaCodec",
+    "OMXClient",
+    "PlatformConfig",
+    "SensorService",
+    "SensorManager",
+    "netd",
+    "resolv",
+    "DnsProxyListener",
+    "cutils-trace",
+    "Looper",
+    "PropertyManager",
+    "vndksupport",
+    "linker",
+    "libc",
+    "StatusBarIconController",
+    "PhoneStatusBarPolicy",
+    "cnss-daemon",
+    "wificond",
+    "WifiHAL",
+    "audit",
+    "thermal_repeater",
+    "ThermalEngine",
+    "adbd",
+    "usbd",
+    "lowmemorykiller",
+    "lmkd",
+    "perfetto",
+    "traced_probes",
+    "traced",
     "statsd",
 ];
 
@@ -127,16 +156,22 @@ impl Filter {
         }
 
         // Hide vendor/system noise unless user has explicit tag include filters
-        if self.hide_vendor_noise && !self.tag_filters.iter().any(|f| matches!(f, TagFilter::Include(_) | TagFilter::Regex(_))) {
+        if self.hide_vendor_noise
+            && !self
+                .tag_filters
+                .iter()
+                .any(|f| matches!(f, TagFilter::Include(_) | TagFilter::Regex(_)))
+        {
             if VENDOR_TAGS.iter().any(|&t| entry.tag == t) {
                 return false;
             }
         }
 
         if !self.tag_filters.is_empty() {
-            let has_include = self.tag_filters.iter().any(|f| {
-                matches!(f, TagFilter::Include(_) | TagFilter::Regex(_))
-            });
+            let has_include = self
+                .tag_filters
+                .iter()
+                .any(|f| matches!(f, TagFilter::Include(_) | TagFilter::Regex(_)));
 
             for f in &self.tag_filters {
                 if let TagFilter::Exclude(name) = f {

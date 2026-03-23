@@ -1,5 +1,5 @@
-use std::process::Stdio;
 use std::net::UdpSocket;
+use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -40,28 +40,62 @@ impl AdbDevice {
     }
 }
 
+/// Returns true if `serial` is a TCP/IP connection (IP:port format).
+/// USB serials and mDNS serials (`adb-XXX._adb-tls-connect._tcp`) do not contain `:`.
+pub fn is_tcp_device(serial: &str) -> bool {
+    serial.contains(':')
+}
+
+/// Deduplicate devices that refer to the same physical hardware.
+/// When wireless debugging is active, `adb devices -l` emits both an IP:port entry
+/// and an mDNS service-name entry for the same device. Keep only the IP:port one.
+fn deduplicate_devices(devices: Vec<AdbDevice>) -> Vec<AdbDevice> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut result: Vec<AdbDevice> = Vec::new();
+
+    for device in devices {
+        let name = device.friendly_name();
+        if let Some(&idx) = seen.get(&name) {
+            // Prefer IP:port serial over mDNS/USB serial
+            if is_tcp_device(&device.serial) && !is_tcp_device(&result[idx].serial) {
+                result[idx] = device;
+            }
+        } else {
+            seen.insert(name, result.len());
+            result.push(device);
+        }
+    }
+
+    result
+}
+
 pub async fn list_devices() -> Vec<AdbDevice> {
     let output = match Command::new("adb").args(["devices", "-l"]).output().await {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
 
-    String::from_utf8_lossy(&output.stdout)
+    let raw: Vec<AdbDevice> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .skip(1)
         .filter_map(|line| {
             let line = line.trim();
-            if line.is_empty() { return None; }
-            // Split on first occurrence of "device" keyword (status field)
-            // Wireless devices have extra mDNS info between serial and "device"
-            let mut parts = line.splitn(2, "device");
-            let serial_part = parts.next()?.trim();
-            let desc_part = parts.next()?;
-            let serial = serial_part.split_whitespace().next()?.to_string();
-            let description = desc_part.trim().to_string();
-            Some(AdbDevice { serial, description })
+            if line.is_empty() {
+                return None;
+            }
+            // Find " device " as the status separator (with spaces to avoid matching "device:" in descriptions)
+            // Line format: <serial> [mDNS info] device <description key:value pairs>
+            let idx = line.find(" device ")?;
+            let serial = line[..idx].trim().to_string();
+            let description = line[idx + 8..].trim().to_string();
+            Some(AdbDevice {
+                serial,
+                description,
+            })
         })
-        .collect()
+        .collect();
+
+    deduplicate_devices(raw)
 }
 
 pub async fn list_packages(device: &str) -> Vec<String> {
@@ -140,15 +174,21 @@ impl Drop for LogcatHandle {
     }
 }
 
-pub fn spawn_logcat(rt: &tokio::runtime::Handle, device: String, pid_filter: Option<u32>) -> LogcatHandle {
+pub fn spawn_logcat(
+    rt: &tokio::runtime::Handle,
+    device: String,
+    pid_filter: Option<u32>,
+) -> LogcatHandle {
     let (tx, rx) = mpsc::channel::<String>(4096);
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
     rt.spawn(async move {
         let mut args = vec![
-            "-s".to_string(), device,
+            "-s".to_string(),
+            device,
             "logcat".to_string(),
-            "-v".to_string(), "threadtime".to_string(),
+            "-v".to_string(),
+            "threadtime".to_string(),
         ];
         if let Some(pid) = pid_filter {
             args.push(format!("--pid={pid}"));
@@ -229,9 +269,7 @@ pub fn spawn_device_tracker(rt: &tokio::runtime::Handle) -> mpsc::Receiver<Vec<A
                     Ok(_) => {}
                     Err(_) => break,
                 }
-                let len = match usize::from_str_radix(
-                    &String::from_utf8_lossy(&len_buf), 16
-                ) {
+                let len = match usize::from_str_radix(&String::from_utf8_lossy(&len_buf), 16) {
                     Ok(l) => l,
                     Err(_) => break,
                 };
@@ -251,20 +289,23 @@ pub fn spawn_device_tracker(rt: &tokio::runtime::Handle) -> mpsc::Receiver<Vec<A
                 }
 
                 let text = String::from_utf8_lossy(&buf[..len]);
-                let devices: Vec<AdbDevice> = text.lines()
+                let raw: Vec<AdbDevice> = text
+                    .lines()
                     .filter_map(|line| {
                         let line = line.trim();
-                        if line.is_empty() { return None; }
-                        let mut parts = line.splitn(2, "device");
-                        let serial_part = parts.next()?.trim();
-                        // Must have "device" somewhere after the serial
-                        let desc_part = parts.next()?;
-                        // Serial is the first whitespace-delimited token
-                        let serial = serial_part.split_whitespace().next()?.to_string();
-                        let description = desc_part.trim().to_string();
-                        Some(AdbDevice { serial, description })
+                        if line.is_empty() {
+                            return None;
+                        }
+                        let idx = line.find(" device ")?;
+                        let serial = line[..idx].trim().to_string();
+                        let description = line[idx + 8..].trim().to_string();
+                        Some(AdbDevice {
+                            serial,
+                            description,
+                        })
                     })
                     .collect();
+                let devices = deduplicate_devices(raw);
                 if tx.send(devices).await.is_err() {
                     return;
                 }
@@ -309,6 +350,24 @@ pub async fn connect_device(host_port: &str) -> Result<String, String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if output.status.success() && stdout.to_lowercase().contains("connected") {
+        Ok(stdout.trim().to_string())
+    } else {
+        Err(format!("{}{}", stdout.trim(), stderr.trim()))
+    }
+}
+
+/// Disconnect a wireless device using `adb disconnect host:port`.
+pub async fn disconnect_device(serial: &str) -> Result<String, String> {
+    let output = Command::new("adb")
+        .args(["disconnect", serial])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run adb disconnect: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if stdout.to_lowercase().contains("disconnected") || output.status.success() {
         Ok(stdout.trim().to_string())
     } else {
         Err(format!("{}{}", stdout.trim(), stderr.trim()))
@@ -445,7 +504,9 @@ pub fn spawn_mdns_pairing_discovery(
                 Ok(ServiceEvent::ServiceResolved(info)) => {
                     // Need at least one connect port before pairing (like lyto)
                     if connect_ports.is_empty() {
-                        eprintln!("mDNS: pairing service found but no connect port yet, waiting...");
+                        eprintln!(
+                            "mDNS: pairing service found but no connect port yet, waiting..."
+                        );
                         // Still try to pair — some setups may work without connect port
                     }
 
@@ -486,12 +547,11 @@ pub fn spawn_mdns_pairing_discovery(
                                 .args(["connect", &connect_addr])
                                 .output();
                             let _ = tx.blocking_send(Ok(format!(
-                                "Paired & connected to {}", connect_addr
+                                "Paired & connected to {}",
+                                connect_addr
                             )));
                         } else {
-                            let _ = tx.blocking_send(Ok(format!(
-                                "Paired with {pair_addr}"
-                            )));
+                            let _ = tx.blocking_send(Ok(format!("Paired with {pair_addr}")));
                         }
                         break;
                     } else {

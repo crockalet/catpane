@@ -1,7 +1,7 @@
 use egui::{self, RichText};
 
-use crate::app::{App, QrPairStatus, QrPairingState};
 use super::theme::*;
+use crate::app::{App, QrPairStatus, QrPairingState};
 
 pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
     egui::Window::new("CatPane — Keyboard Shortcuts")
@@ -10,7 +10,11 @@ pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+            let cmd = if cfg!(target_os = "macos") {
+                "⌘"
+            } else {
+                "Ctrl+"
+            };
             let shortcuts = [
                 (format!("{cmd}D"), "Split pane right"),
                 (format!("{cmd}⇧D"), "Split pane down"),
@@ -27,7 +31,8 @@ pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
             egui::Grid::new("help_grid").striped(true).show(ui, |ui| {
                 for (key, desc) in &shortcuts {
                     if key.is_empty() {
-                        ui.label(""); ui.label("");
+                        ui.label("");
+                        ui.label("");
                     } else {
                         ui.label(RichText::new(key).strong().monospace().size(13.0));
                         ui.label(RichText::new(*desc).size(13.0));
@@ -210,12 +215,34 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
             if app.devices.is_empty() {
                 ui.label(RichText::new("No devices connected").weak());
             } else {
-                for dev in &app.devices {
+                let device_serials: Vec<(String, String)> = app
+                    .devices
+                    .iter()
+                    .map(|d| (d.serial.clone(), d.friendly_name()))
+                    .collect();
+
+                let mut to_disconnect: Option<String> = None;
+
+                for (serial, name) in &device_serials {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("●").color(if is_dark { OD_GREEN } else { OL_GREEN }));
-                        ui.label(&dev.friendly_name());
-                        ui.label(RichText::new(&dev.serial).weak().size(11.0));
+                        ui.label(name);
+                        ui.label(RichText::new(serial.as_str()).weak().size(11.0));
+                        if crate::adb::is_tcp_device(serial) {
+                            if ui.small_button("Disconnect").clicked() {
+                                to_disconnect = Some(serial.clone());
+                            }
+                        }
                     });
+                }
+
+                if let Some(serial) = to_disconnect {
+                    let result = app.rt.block_on(crate::adb::disconnect_device(&serial));
+                    match result {
+                        Ok(msg) => app.wireless_status = Some((true, msg)),
+                        Err(msg) => app.wireless_status = Some((false, msg)),
+                    }
+                    app.device_refresh_pending = true;
                 }
             }
         });
