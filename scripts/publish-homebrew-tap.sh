@@ -36,7 +36,13 @@ cp "$CASK_SOURCE" "$TMP_DIR/Casks/catpane.rb"
 
 pushd "$TMP_DIR" >/dev/null
 
-if git diff --quiet -- Casks/catpane.rb; then
+if [[ -z "$TAP_BRANCH" ]]; then
+  TAP_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo main)"
+fi
+
+git checkout -B "$TAP_BRANCH" >/dev/null
+
+if [[ -z "$(git status --porcelain -- Casks/catpane.rb)" ]]; then
   echo "Homebrew tap already up to date."
   exit 0
 fi
@@ -45,7 +51,7 @@ git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add Casks/catpane.rb
 git commit -m "Update catpane cask${VERSION:+ to v$VERSION}"
-git push --quiet origin HEAD
+git push --quiet origin "HEAD:refs/heads/$TAP_BRANCH"
 
 popd >/dev/null
 
