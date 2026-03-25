@@ -8,6 +8,11 @@ APP_NAME="${APP_NAME:-CatPane}"
 ARCHIVE_ROOT="${ARCHIVE_ROOT:-$ROOT_DIR/dist}"
 ICON_FILE="${ICON_FILE:-$ROOT_DIR/assets/CatPane.icns}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-}"
+APPLE_NOTARY_KEY_ID="${APPLE_NOTARY_KEY_ID:-}"
+APPLE_NOTARY_ISSUER="${APPLE_NOTARY_ISSUER:-}"
+APPLE_NOTARY_KEY_PATH="${APPLE_NOTARY_KEY_PATH:-}"
 
 IFS=$'\t' read -r DEFAULT_BINARY_NAME DEFAULT_VERSION <<EOF
 $("$PYTHON_BIN" - "$ROOT_DIR/Cargo.toml" <<'PY'
@@ -80,6 +85,14 @@ PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ZIP_PATH="$OUTPUT_DIR/${ARCHIVE_NAME}.zip"
 SHA_PATH="$OUTPUT_DIR/${ARCHIVE_NAME}.sha256"
 
+create_release_zip() {
+  rm -f "$ZIP_PATH"
+  (
+    cd "$OUTPUT_DIR"
+    ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ARCHIVE_NAME}.zip"
+  )
+}
+
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$BINARY_NAME"
 chmod +x "$MACOS_DIR/$BINARY_NAME"
@@ -107,6 +120,28 @@ else:
     print("io.github.catpane")
 PY
   )"
+fi
+
+NOTARIZE_ENABLED=false
+if [[ -n "$APPLE_NOTARY_KEY_ID" || -n "$APPLE_NOTARY_ISSUER" || -n "$APPLE_NOTARY_KEY_PATH" ]]; then
+  if [[ -z "$APPLE_NOTARY_KEY_ID" || -z "$APPLE_NOTARY_ISSUER" || -z "$APPLE_NOTARY_KEY_PATH" ]]; then
+    echo "APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER, and APPLE_NOTARY_KEY_PATH must all be set together." >&2
+    exit 1
+  fi
+  if [[ -z "$CODESIGN_IDENTITY" ]]; then
+    echo "Notarization requires CODESIGN_IDENTITY to be set." >&2
+    exit 1
+  fi
+  if [[ ! -f "$APPLE_NOTARY_KEY_PATH" ]]; then
+    echo "Notary API key file not found at $APPLE_NOTARY_KEY_PATH" >&2
+    exit 1
+  fi
+  NOTARIZE_ENABLED=true
+fi
+
+if [[ -n "$CODESIGN_ENTITLEMENTS" && ! -f "$CODESIGN_ENTITLEMENTS" ]]; then
+  echo "Codesign entitlements file not found at $CODESIGN_ENTITLEMENTS" >&2
+  exit 1
 fi
 
 "$PYTHON_BIN" - "$PLIST_PATH" "$BUNDLE_ID" "$BINARY_NAME" "$APP_NAME" "$VERSION" "$ICON_NAME" <<'PY'
@@ -141,11 +176,39 @@ if icon_name:
 plist_path.write_bytes(plistlib.dumps(plist, sort_keys=False))
 PY
 
-rm -f "$ZIP_PATH" "$SHA_PATH"
-(
-  cd "$OUTPUT_DIR"
-  ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ARCHIVE_NAME}.zip"
-)
+if [[ -n "$CODESIGN_IDENTITY" ]]; then
+  CODESIGN_ARGS=(
+    --force
+    --options runtime
+    --sign "$CODESIGN_IDENTITY"
+    --timestamp
+  )
+
+  /usr/bin/codesign "${CODESIGN_ARGS[@]}" "$MACOS_DIR/$BINARY_NAME"
+
+  APP_CODESIGN_ARGS=("${CODESIGN_ARGS[@]}")
+  if [[ -n "$CODESIGN_ENTITLEMENTS" ]]; then
+    APP_CODESIGN_ARGS+=(--entitlements "$CODESIGN_ENTITLEMENTS")
+  fi
+  /usr/bin/codesign "${APP_CODESIGN_ARGS[@]}" "$APP_DIR"
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+fi
+
+rm -f "$SHA_PATH"
+create_release_zip
+
+if [[ "$NOTARIZE_ENABLED" == "true" ]]; then
+  /usr/bin/xcrun notarytool submit \
+    "$ZIP_PATH" \
+    --key "$APPLE_NOTARY_KEY_PATH" \
+    --key-id "$APPLE_NOTARY_KEY_ID" \
+    --issuer "$APPLE_NOTARY_ISSUER" \
+    --wait
+  /usr/bin/xcrun stapler staple "$APP_DIR"
+  /usr/bin/xcrun stapler validate "$APP_DIR"
+  create_release_zip
+fi
+
 shasum -a 256 "$ZIP_PATH" | awk '{print $1}' > "$SHA_PATH"
 
 echo "Created:"
