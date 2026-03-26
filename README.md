@@ -50,6 +50,46 @@ cargo build --release
 ./target/release/catpane
 ```
 
+## MCP Server
+
+CatPane can also run as a headless stdio MCP server:
+
+```sh
+catpane mcp
+```
+
+If you are running from source during development:
+
+```sh
+cargo run -- mcp
+```
+
+This mode still requires `adb` in your `PATH` at runtime.
+
+Available MCP tools:
+
+- `list_devices`
+- `get_logs`
+- `clear_logs`
+- `start_capture`
+- `stop_capture`
+- `get_status`
+
+Example MCP client config using stdio transport:
+
+```json
+{
+  "mcpServers": {
+    "catpane-logcat": {
+      "command": "/absolute/path/to/catpane",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Use `start_capture` to begin buffering logs for a device, then query them with `get_logs`. `clear_logs` resets the current buffer without stopping capture, and `get_status` shows active captures plus buffer state.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |

@@ -2,10 +2,11 @@ mod adb;
 mod app;
 mod filter;
 mod log_entry;
+mod mcp;
 mod pane;
 mod ui;
 
-use std::time::Duration;
+use std::{ffi::OsStr, time::Duration};
 
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
@@ -511,13 +512,37 @@ fn is_system_dark_mode() -> bool {
     }
 }
 
+fn should_run_mcp_stdio() -> bool {
+    matches!(
+        std::env::args_os().nth(1).as_deref(),
+        Some(arg) if arg == OsStr::new("mcp")
+    )
+}
+
+fn run_mcp_mode() -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("Failed to create tokio runtime: {err}"))?;
+    let rt_handle = rt.handle().clone();
+    rt.block_on(mcp::run_stdio_server(rt_handle))
+}
+
 fn main() -> eframe::Result<()> {
+    if should_run_mcp_stdio() {
+        if let Err(err) = run_mcp_mode() {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // Auto-fork: re-launch as a detached process unless already forked
     if std::env::var("CATPANE_FORKED").is_err() {
         use std::process::Command;
         let exe = std::env::current_exe().expect("Failed to get executable path");
         Command::new(&exe)
-            .args(std::env::args().skip(1))
+            .args(std::env::args_os().skip(1))
             .env("CATPANE_FORKED", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
