@@ -23,6 +23,7 @@ cask "catpane" do
   end
 
   app "CatPane.app"
+  binary "#{appdir}/CatPane.app/Contents/MacOS/catpane"
 
   zap trash: [
     "~/.config/catpane/session.json",
@@ -33,5 +34,8 @@ cask "catpane" do
     `adb` is required at runtime.
     Install it with:
       brew install --cask android-platform-tools
+
+    A `catpane` CLI symlink is added to your PATH, so you can run the MCP server with:
+      catpane mcp
   EOS
 end
