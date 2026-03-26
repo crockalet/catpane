@@ -1,0 +1,11 @@
+# Smithery configuration for CatPane MCP server.
+# Allows AI agents to discover and run the logcat MCP server via `catpane mcp`.
+# See: https://smithery.ai/docs/build/quickstart
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  commandFunction: |-
+    (_config) => ({ command: "catpane", args: ["mcp"] })

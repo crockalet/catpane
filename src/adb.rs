@@ -4,6 +4,35 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+/// Resolves the `adb` binary path, probing common macOS installation locations
+/// so that GUI apps (Homebrew Cask, double-click launch) find adb even when
+/// the shell PATH is not inherited.
+pub fn adb_binary() -> &'static str {
+    static ADB_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ADB_PATH.get_or_init(|| {
+        let mut candidates: Vec<std::path::PathBuf> = vec![
+            "/opt/homebrew/bin/adb".into(),
+            "/usr/local/bin/adb".into(),
+        ];
+        if let Ok(android_home) = std::env::var("ANDROID_HOME") {
+            candidates.push(format!("{android_home}/platform-tools/adb").into());
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(
+                format!("{home}/Library/Android/sdk/platform-tools/adb").into(),
+            );
+        }
+
+        for path in &candidates {
+            if path.exists() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+
+        "adb".to_string()
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdbDevice {
     pub serial: String,
@@ -70,7 +99,7 @@ fn deduplicate_devices(devices: Vec<AdbDevice>) -> Vec<AdbDevice> {
 }
 
 pub async fn list_devices() -> Vec<AdbDevice> {
-    let output = match Command::new("adb").args(["devices", "-l"]).output().await {
+    let output = match Command::new(adb_binary()).args(["devices", "-l"]).output().await {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -100,7 +129,7 @@ pub async fn list_devices() -> Vec<AdbDevice> {
 
 pub async fn list_packages(device: &str) -> Vec<String> {
     // Try running processes first
-    if let Ok(output) = Command::new("adb")
+    if let Ok(output) = Command::new(adb_binary())
         .args(["-s", device, "shell", "ps", "-A", "-o", "NAME"])
         .output()
         .await
@@ -126,7 +155,7 @@ pub async fn list_packages(device: &str) -> Vec<String> {
     }
 
     // Fallback: all installed packages
-    let output = match Command::new("adb")
+    let output = match Command::new(adb_binary())
         .args(["-s", device, "shell", "pm", "list", "packages"])
         .output()
         .await
@@ -144,7 +173,7 @@ pub async fn list_packages(device: &str) -> Vec<String> {
 }
 
 pub async fn get_pid_for_package(device: &str, package: &str) -> Option<u32> {
-    let output = Command::new("adb")
+    let output = Command::new(adb_binary())
         .args(["-s", device, "shell", "pidof", package])
         .output()
         .await
@@ -194,7 +223,7 @@ pub fn spawn_logcat(
             args.push(format!("--pid={pid}"));
         }
 
-        let mut child = match Command::new("adb")
+        let mut child = match Command::new(adb_binary())
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -240,7 +269,7 @@ pub fn spawn_device_tracker(rt: &tokio::runtime::Handle) -> mpsc::Receiver<Vec<A
 
     rt.spawn(async move {
         loop {
-            let mut child = match Command::new("adb")
+            let mut child = match Command::new(adb_binary())
                 .args(["track-devices", "-l"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -321,7 +350,7 @@ pub fn spawn_device_tracker(rt: &tokio::runtime::Handle) -> mpsc::Receiver<Vec<A
 
 /// Pair with a device using `adb pair host:port code`.
 pub async fn pair_device(host_port: &str, code: &str) -> Result<String, String> {
-    let output = Command::new("adb")
+    let output = Command::new(adb_binary())
         .args(["pair", host_port, code])
         .output()
         .await
@@ -340,7 +369,7 @@ pub async fn pair_device(host_port: &str, code: &str) -> Result<String, String> 
 
 /// Connect to a device using `adb connect host:port`.
 pub async fn connect_device(host_port: &str) -> Result<String, String> {
-    let output = Command::new("adb")
+    let output = Command::new(adb_binary())
         .args(["connect", host_port])
         .output()
         .await
@@ -358,7 +387,7 @@ pub async fn connect_device(host_port: &str) -> Result<String, String> {
 
 /// Disconnect a wireless device using `adb disconnect host:port`.
 pub async fn disconnect_device(serial: &str) -> Result<String, String> {
-    let output = Command::new("adb")
+    let output = Command::new(adb_binary())
         .args(["disconnect", serial])
         .output()
         .await
