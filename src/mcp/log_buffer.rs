@@ -173,6 +173,9 @@ pub struct LogQuery {
     pub min_level: Option<LogLevel>,
     pub tag_query: Option<String>,
     pub text: Option<String>,
+    pub process: Option<String>,
+    pub subsystem: Option<String>,
+    pub category: Option<String>,
     pub since: Option<NormalizedTimestamp>,
 }
 
@@ -185,6 +188,9 @@ impl Default for LogQuery {
             min_level: None,
             tag_query: None,
             text: None,
+            process: None,
+            subsystem: None,
+            category: None,
             since: None,
         }
     }
@@ -219,6 +225,9 @@ impl LogQuery {
         let mut filter = Filter {
             min_level: self.min_level.unwrap_or(LogLevel::Verbose),
             package: None,
+            ios_process: self.process.clone(),
+            ios_subsystem: self.subsystem.clone(),
+            ios_category: self.category.clone(),
             tag_filters: self
                 .tag_query
                 .as_deref()
@@ -434,14 +443,19 @@ fn parse_u16_component(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_entry::LogPlatform;
 
     fn entry(timestamp: &str, level: LogLevel, tag: &str, message: &str) -> LogEntry {
         LogEntry {
+            platform: LogPlatform::Android,
             timestamp: timestamp.to_string(),
-            pid: 1234,
-            tid: 5678,
+            pid: Some(1234),
+            tid: Some(5678),
             level,
             tag: tag.to_string(),
+            process: None,
+            subsystem: None,
+            category: None,
             message: message.to_string(),
         }
     }

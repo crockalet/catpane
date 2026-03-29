@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::Deserialize;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -74,13 +76,24 @@ impl fmt::Display for LogLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogPlatform {
+    Android,
+    IosSimulator,
+}
+
 #[derive(Debug, Clone)]
 pub struct LogEntry {
+    pub platform: LogPlatform,
     pub timestamp: String,
-    pub pid: u32,
-    pub tid: u32,
+    pub pid: Option<u32>,
+    pub tid: Option<u64>,
     pub level: LogLevel,
     pub tag: String,
+    pub process: Option<String>,
+    pub subsystem: Option<String>,
+    pub category: Option<String>,
     pub message: String,
 }
 
@@ -113,11 +126,15 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
     };
 
     Some(LogEntry {
+        platform: LogPlatform::Android,
         timestamp,
-        pid,
-        tid,
+        pid: Some(pid),
+        tid: Some(u64::from(tid)),
         level,
         tag,
+        process: None,
+        subsystem: None,
+        category: None,
         message,
     })
 }
@@ -126,6 +143,88 @@ fn split_first_whitespace(s: &str) -> Option<(&str, &str)> {
     let s = s.trim_start();
     let end = s.find(char::is_whitespace)?;
     Some((&s[..end], &s[end..]))
+}
+
+#[derive(Debug, Deserialize)]
+struct IosLogRecord {
+    #[serde(default, rename = "timestamp")]
+    timestamp: String,
+    #[serde(default, rename = "messageType")]
+    message_type: String,
+    #[serde(default, rename = "eventMessage")]
+    event_message: String,
+    #[serde(default, rename = "subsystem")]
+    subsystem: String,
+    #[serde(default, rename = "category")]
+    category: String,
+    #[serde(default, rename = "processImagePath")]
+    process_image_path: String,
+    #[serde(default, rename = "processID")]
+    process_id: u32,
+    #[serde(default, rename = "threadID")]
+    thread_id: u64,
+}
+
+pub fn parse_ios_log_ndjson_line(line: &str) -> Option<LogEntry> {
+    let record: IosLogRecord = serde_json::from_str(line).ok()?;
+    let timestamp = normalize_ios_timestamp(&record.timestamp)?;
+    let process = process_name_from_path(&record.process_image_path);
+    let subsystem = normalize_optional_string(&record.subsystem);
+    let category = normalize_optional_string(&record.category);
+    let tag = subsystem
+        .clone()
+        .or_else(|| process.clone())
+        .or_else(|| category.clone())
+        .unwrap_or_else(|| "iOS".to_string());
+
+    Some(LogEntry {
+        platform: LogPlatform::IosSimulator,
+        timestamp,
+        pid: Some(record.process_id),
+        tid: Some(record.thread_id),
+        level: ios_message_type_to_level(&record.message_type),
+        tag,
+        process,
+        subsystem,
+        category,
+        message: record.event_message,
+    })
+}
+
+fn normalize_ios_timestamp(raw: &str) -> Option<String> {
+    if raw.len() < 23 {
+        return None;
+    }
+    let month = raw.get(5..7)?;
+    let day = raw.get(8..10)?;
+    let time = raw.get(11..23)?;
+    Some(format!("{month}-{day} {time}"))
+}
+
+fn process_name_from_path(path: &str) -> Option<String> {
+    normalize_optional_string(path)
+        .and_then(|path| path.rsplit('/').next().map(str::to_string))
+        .and_then(|path| normalize_optional_string(&path))
+}
+
+fn normalize_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn ios_message_type_to_level(message_type: &str) -> LogLevel {
+    match message_type.trim().to_ascii_lowercase().as_str() {
+        "debug" => LogLevel::Debug,
+        "info" => LogLevel::Info,
+        "error" => LogLevel::Error,
+        "fault" => LogLevel::Fatal,
+        "default" | "notice" => LogLevel::Info,
+        _ => LogLevel::Verbose,
+    }
 }
 
 #[cfg(test)]
@@ -137,10 +236,25 @@ mod tests {
         let line = "03-10 06:30:45.123  1234  5678 D MyTag   : Hello world";
         let entry = parse_logcat_line(line).unwrap();
         assert_eq!(entry.timestamp, "03-10 06:30:45.123");
-        assert_eq!(entry.pid, 1234);
-        assert_eq!(entry.tid, 5678);
+        assert_eq!(entry.pid, Some(1234));
+        assert_eq!(entry.tid, Some(5678));
         assert_eq!(entry.level, LogLevel::Debug);
         assert_eq!(entry.tag, "MyTag");
         assert_eq!(entry.message, "Hello world");
+    }
+
+    #[test]
+    fn parses_ios_ndjson_lines() {
+        let line = r#"{"messageType":"Default","subsystem":"com.example.app","category":"network","threadID":42,"processImagePath":"/Applications/MyApp.app/MyApp","timestamp":"2026-03-29 13:59:40.572987+0500","eventMessage":"hello from ios","processID":123}"#;
+        let entry = parse_ios_log_ndjson_line(line).unwrap();
+        assert_eq!(entry.platform, LogPlatform::IosSimulator);
+        assert_eq!(entry.timestamp, "03-29 13:59:40.572");
+        assert_eq!(entry.pid, Some(123));
+        assert_eq!(entry.tid, Some(42));
+        assert_eq!(entry.tag, "com.example.app");
+        assert_eq!(entry.process.as_deref(), Some("MyApp"));
+        assert_eq!(entry.subsystem.as_deref(), Some("com.example.app"));
+        assert_eq!(entry.category.as_deref(), Some("network"));
+        assert_eq!(entry.message, "hello from ios");
     }
 }

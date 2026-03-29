@@ -1,6 +1,6 @@
-use crate::adb::{self, LogcatHandle};
+use crate::capture::{self, CaptureHandle, ConnectedDevice};
 use crate::filter::Filter;
-use crate::log_entry::{LogEntry, parse_logcat_line};
+use crate::log_entry::LogEntry;
 
 const MAX_LOG_ENTRIES: usize = 50_000;
 
@@ -124,7 +124,7 @@ pub struct Pane {
     pub scroll_to_bottom: bool,
     pub auto_scroll: bool,
     pub paused: bool,
-    pub logcat_handle: Option<LogcatHandle>,
+    pub capture_handle: Option<CaptureHandle>,
     pub pid_filter: Option<u32>,
     // Search
     pub search_open: bool,
@@ -136,6 +136,9 @@ pub struct Pane {
     pub prev_tag_input: String,
     // Package filter text in popup
     pub package_filter_text: String,
+    pub ios_process_filter_text: String,
+    pub ios_subsystem_filter_text: String,
+    pub ios_category_filter_text: String,
     pub pkg_selection_index: i32,
     // Tag suggestion keyboard selection index
     pub tag_suggestion_index: i32,
@@ -159,7 +162,7 @@ pub struct Pane {
     // pane tree restructures that change the ScrollArea's internal id.
     pub scroll_offset_y: f32,
     // Cooldown for auto-restart of dead logcat (avoid rapid-fire respawn loops)
-    pub last_logcat_restart: std::time::Instant,
+    pub last_capture_restart: std::time::Instant,
 }
 
 impl Pane {
@@ -186,7 +189,7 @@ impl Pane {
             scroll_to_bottom: true,
             auto_scroll: true,
             paused: false,
-            logcat_handle: None,
+            capture_handle: None,
             pid_filter: None,
             search_open: false,
             search_input: String::new(),
@@ -195,6 +198,9 @@ impl Pane {
             tag_input: String::new(),
             prev_tag_input: String::new(),
             package_filter_text: String::new(),
+            ios_process_filter_text: String::new(),
+            ios_subsystem_filter_text: String::new(),
+            ios_category_filter_text: String::new(),
             pkg_selection_index: -1,
             tag_suggestion_index: -1,
             seen_tags: Vec::new(),
@@ -207,13 +213,13 @@ impl Pane {
             last_pid_poll: std::time::Instant::now(),
             word_wrap: false,
             scroll_offset_y: 0.0,
-            last_logcat_restart: std::time::Instant::now(),
+            last_capture_restart: std::time::Instant::now(),
         }
     }
 
     pub fn ingest_lines(&mut self) {
         if self.paused {
-            if let Some(ref mut handle) = self.logcat_handle {
+            if let Some(ref mut handle) = self.capture_handle {
                 while handle.rx.try_recv().is_ok() {}
             }
             return;
@@ -221,22 +227,19 @@ impl Pane {
 
         let mut added = false;
         let mut channel_dead = false;
-        if let Some(ref mut handle) = self.logcat_handle {
+        if let Some(ref mut handle) = self.capture_handle {
             for _ in 0..500 {
                 match handle.rx.try_recv() {
-                    Ok(line) => {
-                        if let Some(entry) = parse_logcat_line(&line) {
-                            // Track unique tags
-                            if !self.seen_tags.contains(&entry.tag) {
-                                self.seen_tags.push(entry.tag.clone());
-                            }
-                            let idx = self.entries.len();
-                            let passes = self.filter.matches(&entry, self.pid_filter);
-                            self.entries.push(entry);
-                            if passes {
-                                self.filtered_indices.push(idx);
-                                added = true;
-                            }
+                    Ok(entry) => {
+                        if !self.seen_tags.contains(&entry.tag) {
+                            self.seen_tags.push(entry.tag.clone());
+                        }
+                        let idx = self.entries.len();
+                        let passes = self.filter.matches(&entry, self.pid_filter);
+                        self.entries.push(entry);
+                        if passes {
+                            self.filtered_indices.push(idx);
+                            added = true;
                         }
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -248,10 +251,10 @@ impl Pane {
             }
         }
 
-        // Logcat process exited — drop the dead handle so the update loop
+        // Capture process exited — drop the dead handle so the update loop
         // can detect this and restart when the device is available.
         if channel_dead {
-            self.logcat_handle = None;
+            self.capture_handle = None;
         }
 
         if added && self.auto_scroll {
@@ -330,18 +333,36 @@ impl Pane {
         self.rebuild_filtered();
     }
 
-    pub fn start_logcat(&mut self, rt: &tokio::runtime::Handle) {
-        self.stop_logcat();
-        if let Some(ref device) = self.device {
-            self.logcat_handle = Some(adb::spawn_logcat(rt, device.clone(), self.pid_filter));
-            self.last_logcat_restart = std::time::Instant::now();
+    pub fn apply_ios_filters(&mut self) {
+        self.filter.ios_process = normalize_optional_string(&self.ios_process_filter_text);
+        self.filter.ios_subsystem = normalize_optional_string(&self.ios_subsystem_filter_text);
+        self.filter.ios_category = normalize_optional_string(&self.ios_category_filter_text);
+        self.rebuild_filtered();
+    }
+
+    pub fn start_capture(&mut self, rt: &tokio::runtime::Handle, devices: &[ConnectedDevice]) {
+        self.stop_capture();
+        if let Some(device_id) = self.device.as_ref() {
+            if let Some(device) = devices.iter().find(|device| &device.id == device_id) {
+                self.capture_handle = Some(capture::spawn_capture(rt, device, self.pid_filter));
+                self.last_capture_restart = std::time::Instant::now();
+            }
         }
     }
 
-    pub fn stop_logcat(&mut self) {
-        if let Some(ref handle) = self.logcat_handle {
+    pub fn stop_capture(&mut self) {
+        if let Some(ref handle) = self.capture_handle {
             handle.stop();
         }
-        self.logcat_handle = None;
+        self.capture_handle = None;
+    }
+}
+
+fn normalize_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }

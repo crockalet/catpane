@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
-    adb::{self, AdbDevice},
-    log_entry::{LogLevel, parse_logcat_line},
+    capture::{self, ConnectedDevice, DevicePlatform},
+    log_entry::LogLevel,
 };
 
 use super::{
@@ -228,6 +228,12 @@ pub struct GetLogsArgs {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub subsystem: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
     pub since: Option<String>,
 }
 
@@ -248,6 +254,9 @@ impl GetLogsArgs {
         let min_level = min_level_raw.as_deref().map(parse_log_level).transpose()?;
         let tag_query = normalize_optional_string(self.tag_query);
         let text = normalize_optional_string(self.text);
+        let process = normalize_optional_string(self.process);
+        let subsystem = normalize_optional_string(self.subsystem);
+        let category = normalize_optional_string(self.category);
         let since = normalize_optional_string(self.since);
 
         let mut query = LogQuery {
@@ -257,6 +266,9 @@ impl GetLogsArgs {
             min_level,
             tag_query: None,
             text: text.clone(),
+            process: process.clone(),
+            subsystem: subsystem.clone(),
+            category: category.clone(),
             since: None,
         };
 
@@ -279,6 +291,9 @@ impl GetLogsArgs {
                 min_level: min_level.map(log_level_name).map(str::to_owned),
                 tag_query,
                 text,
+                process,
+                subsystem,
+                category,
                 since,
             },
         ))
@@ -291,16 +306,19 @@ pub struct DeviceInfo {
     pub serial: String,
     pub description: String,
     pub friendly_name: String,
+    pub platform: DevicePlatform,
     pub is_tcp: bool,
 }
 
-impl From<AdbDevice> for DeviceInfo {
-    fn from(device: AdbDevice) -> Self {
+impl From<ConnectedDevice> for DeviceInfo {
+    fn from(device: ConnectedDevice) -> Self {
+        let is_tcp = device.supports_disconnect();
         Self {
-            friendly_name: device.friendly_name(),
-            is_tcp: adb::is_tcp_device(&device.serial),
-            serial: device.serial,
+            friendly_name: device.name,
+            is_tcp,
+            serial: device.id,
             description: device.description,
+            platform: device.platform,
         }
     }
 }
@@ -334,6 +352,8 @@ impl From<LogBufferMeta> for LogBufferStatus {
 pub struct CaptureStatus {
     pub capture_id: String,
     pub device: String,
+    pub platform: DevicePlatform,
+    pub device_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,6 +383,12 @@ pub struct AppliedLogQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }
 
@@ -373,11 +399,19 @@ pub struct LogEntryView {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub normalized_timestamp: Option<String>,
-    pub pid: u32,
-    pub tid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tid: Option<u64>,
     pub level: String,
     pub level_label: String,
     pub tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     pub message: String,
 }
 
@@ -393,6 +427,9 @@ impl From<BufferedLogEntry> for LogEntryView {
             level: level.as_char().to_string(),
             level_label: level.label().to_owned(),
             tag: buffered.entry.tag,
+            process: buffered.entry.process,
+            subsystem: buffered.entry.subsystem,
+            category: buffered.entry.category,
             message: buffered.entry.message,
         }
     }
@@ -526,7 +563,7 @@ impl McpRuntimeState {
         &self,
         _args: ListDevicesArgs,
     ) -> Result<ListDevicesResponse, McpToolError> {
-        let devices = adb::list_devices()
+        let devices = capture::list_devices()
             .await
             .into_iter()
             .map(DeviceInfo::from)
@@ -556,7 +593,7 @@ impl McpRuntimeState {
             let mut inner = lock_recover(&self.inner);
 
             let replaced = if let Some(existing_id) =
-                find_capture_id_by_device(&inner.captures, &device)
+                find_capture_id_by_device(&inner.captures, &device.id)
             {
                 let existing_is_running = inner
                     .captures
@@ -583,19 +620,21 @@ impl McpRuntimeState {
             inner.next_capture_id = inner.next_capture_id.saturating_add(1);
 
             let shared = Arc::new(CaptureShared::new(
-                device.clone(),
+                device.id.clone(),
+                device.name.clone(),
+                device.platform,
                 package.clone(),
                 pid_filter,
                 capacity,
             ));
-            let mut logcat = adb::spawn_logcat(rt, device.clone(), pid_filter);
+            let mut stream = capture::spawn_capture(rt, &device, pid_filter);
             let shared_for_task = Arc::clone(&shared);
 
             let pump_task = rt.spawn(async move {
-                while let Some(line) = logcat.rx.recv().await {
-                    shared_for_task.append_raw_line(&line);
+                while let Some(entry) = stream.rx.recv().await {
+                    shared_for_task.append_entry(entry);
                 }
-                shared_for_task.finish("logcat stream ended or failed to start");
+                shared_for_task.finish("capture stream ended or failed to start");
             });
 
             let capture = CaptureRuntime {
@@ -821,6 +860,8 @@ struct CaptureStats {
 
 struct CaptureShared {
     device: String,
+    device_name: String,
+    platform: DevicePlatform,
     package: Option<String>,
     pid_filter: Option<u32>,
     started_at_ms: u64,
@@ -831,12 +872,16 @@ struct CaptureShared {
 impl CaptureShared {
     fn new(
         device: String,
+        device_name: String,
+        platform: DevicePlatform,
         package: Option<String>,
         pid_filter: Option<u32>,
         capacity: usize,
     ) -> Self {
         Self {
             device,
+            device_name,
+            platform,
             package,
             pid_filter,
             started_at_ms: now_epoch_ms(),
@@ -845,20 +890,14 @@ impl CaptureShared {
         }
     }
 
-    fn append_raw_line(&self, line: &str) {
-        if let Some(entry) = parse_logcat_line(line) {
-            {
-                let mut buffer = lock_recover(&self.buffer);
-                buffer.append(entry);
-            }
-            let mut stats = lock_recover(&self.stats);
-            stats.ingested_lines = stats.ingested_lines.saturating_add(1);
-            stats.parsed_entries = stats.parsed_entries.saturating_add(1);
-        } else {
-            let mut stats = lock_recover(&self.stats);
-            stats.ingested_lines = stats.ingested_lines.saturating_add(1);
-            stats.parse_errors = stats.parse_errors.saturating_add(1);
+    fn append_entry(&self, entry: crate::log_entry::LogEntry) {
+        {
+            let mut buffer = lock_recover(&self.buffer);
+            buffer.append(entry);
         }
+        let mut stats = lock_recover(&self.stats);
+        stats.ingested_lines = stats.ingested_lines.saturating_add(1);
+        stats.parsed_entries = stats.parsed_entries.saturating_add(1);
     }
 
     fn clear_logs(&self) -> usize {
@@ -893,6 +932,8 @@ impl CaptureShared {
         CaptureStatus {
             capture_id: capture_id.to_owned(),
             device: self.device.clone(),
+            platform: self.platform,
+            device_name: self.device_name.clone(),
             package: self.package.clone(),
             pid_filter: self.pid_filter,
             running,
@@ -909,7 +950,7 @@ impl CaptureShared {
 
 fn list_devices_tool() -> Tool {
     Tool::new(TOOL_LIST_DEVICES, empty_object_schema())
-        .with_description("List connected adb devices that CatPane can capture logs from.")
+        .with_description("List connected Android devices and booted iOS simulators that CatPane can capture logs from.")
 }
 
 fn get_logs_tool() -> Tool {
@@ -918,7 +959,7 @@ fn get_logs_tool() -> Tool {
         object_schema(
             vec![
                 ("captureId", string_property("Specific capture ID to query.")),
-                ("device", string_property("Resolve a capture by adb device serial.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
                 (
                     "cursor",
                     integer_property(
@@ -956,6 +997,9 @@ fn get_logs_tool() -> Tool {
                     ),
                 ),
                 ("text", string_property("Substring search over tag and message text.")),
+                ("process", string_property("Filter iOS logs by process name substring.")),
+                ("subsystem", string_property("Filter iOS logs by subsystem substring.")),
+                ("category", string_property("Filter iOS logs by category substring.")),
                 (
                     "since",
                     string_property(
@@ -966,7 +1010,7 @@ fn get_logs_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Read buffered logcat entries with cursor pagination and CatPane filters.")
+    .with_description("Read buffered capture entries with cursor pagination and CatPane filters.")
 }
 
 fn clear_logs_tool() -> Tool {
@@ -980,7 +1024,7 @@ fn clear_logs_tool() -> Tool {
                 ),
                 (
                     "device",
-                    string_property("Resolve a capture by adb device serial."),
+                    string_property("Resolve a capture by connected device identifier."),
                 ),
             ],
             &[],
@@ -997,17 +1041,17 @@ fn start_capture_tool() -> Tool {
                 (
                     "device",
                     string_property(
-                        "adb serial to capture. If omitted and exactly one device is connected, that device is used automatically.",
+                        "Connected device identifier to capture. If omitted and exactly one Android device or booted iOS simulator is available, that device is used automatically.",
                     ),
                 ),
                 (
                     "pid",
-                    integer_property("Optional PID filter passed through to adb logcat."),
+                    integer_property("Optional Android-only PID filter passed through to adb logcat."),
                 ),
                 (
                     "package",
                     string_property(
-                        "Optional package name to resolve into a PID filter before starting capture.",
+                        "Optional Android-only package name to resolve into a PID filter before starting capture.",
                     ),
                 ),
                 (
@@ -1029,7 +1073,7 @@ fn start_capture_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Start a new logcat capture and buffer it for later MCP queries.")
+    .with_description("Start a new Android or iOS simulator capture and buffer it for later MCP queries.")
 }
 
 fn stop_capture_tool() -> Tool {
@@ -1040,7 +1084,7 @@ fn stop_capture_tool() -> Tool {
                 ("captureId", string_property("Specific capture ID to stop.")),
                 (
                     "device",
-                    string_property("Resolve a capture by adb device serial."),
+                    string_property("Resolve a capture by connected device identifier."),
                 ),
             ],
             &[],
@@ -1055,12 +1099,12 @@ fn get_status_tool() -> Tool {
         object_schema(
             vec![
                 ("captureId", string_property("Specific capture ID to inspect.")),
-                ("device", string_property("Resolve a capture by adb device serial.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
                 (
                     "includeDevices",
                     json!({
                         "type": "boolean",
-                        "description": "Also include the current connected adb device list in the response."
+                        "description": "Also include the current connected Android devices and booted iOS simulators."
                     }),
                 ),
             ],
@@ -1170,18 +1214,18 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
-async fn resolve_connected_device(device: Option<String>) -> Result<String, McpToolError> {
+async fn resolve_connected_device(device: Option<String>) -> Result<ConnectedDevice, McpToolError> {
     let device = normalize_optional_string(device);
-    let devices = adb::list_devices().await;
+    let devices = capture::list_devices().await;
 
     if let Some(device) = device {
-        if devices.iter().any(|connected| connected.serial == device) {
-            return Ok(device);
+        if let Some(connected) = devices.iter().find(|connected| connected.id == device) {
+            return Ok(connected.clone());
         }
 
         if devices.is_empty() {
             return Err(McpToolError::not_found(format!(
-                "device `{device}` is not connected and no adb devices are currently available"
+                "device `{device}` is not connected and no Android devices or booted iOS simulators are currently available"
             )));
         }
 
@@ -1193,21 +1237,30 @@ async fn resolve_connected_device(device: Option<String>) -> Result<String, McpT
 
     match devices.as_slice() {
         [] => Err(McpToolError::not_found(
-            "no connected adb devices found; connect a device or specify one explicitly",
+            "no connected Android devices or booted iOS simulators found; connect a device or boot a simulator",
         )),
-        [device] => Ok(device.serial.clone()),
+        [device] => Ok(device.clone()),
         _ => Err(McpToolError::invalid_params(format!(
-            "multiple adb devices are connected; specify device explicitly ({})",
+            "multiple capture targets are available; specify device explicitly ({})",
             joined_device_serials(&devices)
         ))),
     }
 }
 
 async fn resolve_pid_filter(
-    device: &str,
+    device: &ConnectedDevice,
     pid: Option<u32>,
     package: Option<&str>,
 ) -> Result<Option<u32>, McpToolError> {
+    if device.platform != DevicePlatform::Android {
+        if pid.is_some() || package.is_some() {
+            return Err(McpToolError::invalid_params(
+                "pid and package filters are only supported for Android captures",
+            ));
+        }
+        return Ok(None);
+    }
+
     if let Some(pid) = pid {
         if pid == 0 {
             return Err(McpToolError::invalid_params(
@@ -1226,20 +1279,21 @@ async fn resolve_pid_filter(
         return Ok(None);
     };
 
-    adb::get_pid_for_package(device, package)
+    capture::get_pid_for_package(&device.id, package, std::slice::from_ref(device))
         .await
         .map(Some)
         .ok_or_else(|| {
             McpToolError::not_found(format!(
-                "could not resolve a PID for package `{package}` on device `{device}`"
+                "could not resolve a PID for package `{package}` on device `{}`",
+                device.id
             ))
         })
 }
 
-fn joined_device_serials(devices: &[AdbDevice]) -> String {
+fn joined_device_serials(devices: &[ConnectedDevice]) -> String {
     devices
         .iter()
-        .map(|device| device.serial.as_str())
+        .map(|device| device.id.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }

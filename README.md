@@ -1,13 +1,15 @@
 # CatPane
 
-A lightweight, cross-platform logcat viewer with split panes and multi-window support. Built as a fast alternative to Android Studio's logcat (too resource-heavy) and Aya (no split pane/multi-window).
+A lightweight, cross-platform device log viewer with split panes and multi-window support. CatPane captures Android `adb logcat` streams and logs from booted iOS simulators, while keeping a fast desktop UI and a headless MCP surface.
 
 Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage.
 
 ## Features
 
-- **Split panes** — view multiple logcat streams side by side (vertical/horizontal splits)
+- **Split panes** — view multiple log streams side by side (vertical/horizontal splits)
 - **Multi-window** — open additional windows with ⌘N / Ctrl+N
+- **Android + iOS simulator targets** — capture from connected Android devices and booted iOS simulators
+- **Boot iOS simulators** — launch an available iOS simulator directly from CatPane on macOS
 - **Tag filters** — Android Studio-style syntax with include, exclude, regex, and per-tag levels:
   - `tag:Name` — include only this tag
   - `tag-:Exclude` — hide this tag
@@ -15,7 +17,8 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
   - `CallManagerService:V *:E` — show verbose logs for one tag while still showing errors everywhere else
   - Combine multiple: `tag:MyApp tag-:Verbose tag~:Net.*`
 - **Tag autocomplete** — suggests from tags seen in the log stream
-- **Package filter** — filter by app package name with autocomplete from running packages
+- **Package filter** — Android-only package filtering with autocomplete from running packages
+- **Process / subsystem / category filters** — iOS simulator filtering for unified logging fields
 - **Log level filter** — minimum level selector (V/D/I/W/E/F)
 - **Search** — ⌘F / Ctrl+F with match highlighting and navigation
 - **Copy support** — click to select, shift+click for range, right-click context menu
@@ -23,14 +26,15 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 - **Auto-scroll** — follows new logs, pauses when you scroll up
 - **Session persistence** — saves pane layout, filters, and device selection on exit
 - **Wireless debugging** — QR code pairing with mDNS auto-discovery
-- **Auto-refresh devices** — monitors `adb track-devices` for live device updates
-- **Vendor noise filter** — one-click toggle to hide common system tags
+- **Auto-refresh devices** — refreshes connected Android devices and booted iOS simulators
+- **Noise filter** — hides common Android system tags and iOS simulator device/system logs by default
 - **Dark / Light theme** — OneDark color scheme, auto-detects system preference
 
 ## Requirements
 
-- [ADB](https://developer.android.com/tools/adb) (Android Debug Bridge) in your PATH
 - Rust 2024 edition (1.85+)
+- For Android capture: [ADB](https://developer.android.com/tools/adb) (Android Debug Bridge) in your PATH
+- For iOS simulator capture on macOS: Xcode / CoreSimulator tooling available via `xcrun`
 
 ## Install with Homebrew
 
@@ -40,7 +44,7 @@ brew install --cask crockalet/catpane/catpane
 brew install --cask android-platform-tools
 ```
 
-CatPane needs `adb` at runtime, so install `android-platform-tools` as well if you do not already have it.
+Install `android-platform-tools` if you want Android capture. iOS simulator capture uses Apple tooling that ships with Xcode / Xcode Command Line Tools.
 
 ## Build & Run
 
@@ -65,7 +69,7 @@ If you are running from source during development:
 cargo run -- mcp
 ```
 
-This mode still requires `adb` in your `PATH` at runtime.
+Android captures require `adb` in your `PATH` at runtime. iOS simulator captures require Apple simulator tooling via `xcrun`.
 
 Available MCP tools:
 
@@ -89,7 +93,7 @@ Example MCP client config using stdio transport:
 }
 ```
 
-Use `start_capture` to begin buffering logs for a device, then query them with `get_logs`. `clear_logs` resets the current buffer without stopping capture, and `get_status` shows active captures plus buffer state.
+Use `start_capture` to begin buffering logs for a device or booted iOS simulator, then query them with `get_logs`. `clear_logs` resets the current buffer without stopping capture, and `get_status` shows active captures plus buffer state. `get_logs` also supports iOS-specific `process`, `subsystem`, and `category` filters.
 
 ### Agent skill via `vercel-labs/skills`
 

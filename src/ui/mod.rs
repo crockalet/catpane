@@ -35,6 +35,10 @@ pub fn draw_ui(ctx: &egui::Context, app: &mut App) {
     if app.show_wireless_dialog {
         dialogs::draw_wireless_dialog(ctx, app);
     }
+
+    if app.show_ios_simulator_dialog {
+        dialogs::draw_ios_simulator_dialog(ctx, app);
+    }
 }
 
 fn draw_pane_tree(ui: &mut Ui, app: &mut App, _ids: &[PaneId]) {

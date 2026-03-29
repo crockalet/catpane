@@ -221,7 +221,7 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                 let device_serials: Vec<(String, String)> = app
                     .devices
                     .iter()
-                    .map(|d| (d.serial.clone(), d.friendly_name()))
+                    .map(|device| (device.id.clone(), device.display_name()))
                     .collect();
 
                 let mut to_disconnect: Option<String> = None;
@@ -231,7 +231,11 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                         ui.label(RichText::new("●").color(if is_dark { OD_GREEN } else { OL_GREEN }));
                         ui.label(name);
                         ui.label(RichText::new(serial.as_str()).weak().size(11.0));
-                        if crate::adb::is_tcp_device(serial) {
+                        if app
+                            .devices
+                            .iter()
+                            .any(|device| device.id == *serial && device.supports_disconnect())
+                        {
                             if ui.small_button("Disconnect").clicked() {
                                 to_disconnect = Some(serial.clone());
                             }
@@ -248,5 +252,122 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                     app.device_refresh_pending = true;
                 }
             }
+        });
+}
+
+pub fn draw_ios_simulator_dialog(ctx: &egui::Context, app: &mut App) {
+    let is_dark = ctx.style().visuals.dark_mode;
+
+    egui::Window::new("🍎 Boot iOS Simulator")
+        .open(&mut app.show_ios_simulator_dialog)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(480.0)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Available simulators").strong().size(14.0));
+                if ui.small_button("Refresh").clicked() {
+                    app.ios_simulator_refresh_pending = true;
+                }
+            });
+            ui.label(
+                RichText::new(
+                    "Boot a simulator directly from CatPane. Once booted, it will appear in the device picker.",
+                )
+                .size(11.0)
+                .weak(),
+            );
+
+            if let Some((success, msg)) = &app.ios_simulator_status {
+                let color = if *success {
+                    if is_dark { OD_GREEN } else { OL_GREEN }
+                } else if is_dark {
+                    OD_RED
+                } else {
+                    OL_RED
+                };
+                ui.label(RichText::new(msg.as_str()).color(color).size(12.0));
+            }
+
+            if let Some(booting_udid) = &app.ios_simulator_booting_udid {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(format!("Booting simulator {booting_udid}..."))
+                            .size(12.0),
+                    );
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            if app.ios_simulators.is_empty() {
+                ui.label(RichText::new("No available simulators found").weak());
+                return;
+            }
+
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for simulator in app.ios_simulators.clone() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(simulator.name.as_str()).strong());
+                                    ui.label(
+                                        RichText::new(simulator.runtime.as_str())
+                                            .weak()
+                                            .size(11.0),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            simulator.state, simulator.udid
+                                        ))
+                                        .weak()
+                                        .size(11.0),
+                                    );
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let is_booted = simulator.state == "Booted";
+                                        let is_booting = app
+                                            .ios_simulator_booting_udid
+                                            .as_ref()
+                                            .is_some_and(|booting| booting == &simulator.udid);
+                                        let button = ui.add_enabled(
+                                            !is_booted && app.ios_simulator_booting_udid.is_none(),
+                                            egui::Button::new(if is_booted {
+                                                "Booted"
+                                            } else if is_booting {
+                                                "Booting…"
+                                            } else {
+                                                "Boot"
+                                            }),
+                                        );
+                                        if button.clicked() {
+                                            let (tx, rx) =
+                                                tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                                            let udid = simulator.udid.clone();
+                                            app.ios_simulator_status = None;
+                                            app.ios_simulator_booting_udid = Some(udid.clone());
+                                            app.ios_simulator_boot_rx = Some(rx);
+                                            app.rt.spawn(async move {
+                                                let result = crate::ios::boot_simulator(&udid).await;
+                                                let _ = tx.send(result).await;
+                                            });
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    }
+                });
         });
 }

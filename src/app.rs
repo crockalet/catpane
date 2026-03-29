@@ -1,4 +1,4 @@
-use crate::adb::AdbDevice;
+use crate::capture::ConnectedDevice;
 use crate::log_entry::LogLevel;
 use crate::pane::{Pane, PaneId, PaneNode, SplitDir};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,12 @@ pub enum QrPairStatus {
 struct SessionPane {
     device: Option<String>,
     package: Option<String>,
+    #[serde(default)]
+    ios_process: String,
+    #[serde(default)]
+    ios_subsystem: String,
+    #[serde(default)]
+    ios_category: String,
     tag_input: String,
     min_level: LogLevel,
     hide_vendor_noise: bool,
@@ -57,12 +63,13 @@ pub struct App {
     pub pane_tree: PaneNode,
     pub panes: HashMap<PaneId, Pane>,
     pub focused_pane: PaneId,
-    pub devices: Vec<AdbDevice>,
+    pub devices: Vec<ConnectedDevice>,
     pub rt: tokio::runtime::Handle,
     pub show_help: bool,
     pub device_refresh_pending: bool,
+    pub ios_simulator_refresh_pending: bool,
     pub tag_history: Vec<String>,
-    pub device_tracker: Option<tokio::sync::mpsc::Receiver<Vec<AdbDevice>>>,
+    pub device_tracker: Option<tokio::sync::mpsc::Receiver<Vec<ConnectedDevice>>>,
     // Wireless debugging dialog state
     pub show_wireless_dialog: bool,
     pub wireless_pair_host: String,
@@ -71,24 +78,29 @@ pub struct App {
     pub wireless_status: Option<(bool, String)>,
     // QR pairing state
     pub qr_pairing: Option<QrPairingState>,
+    pub show_ios_simulator_dialog: bool,
+    pub ios_simulators: Vec<crate::ios::IosSimulator>,
+    pub ios_simulator_status: Option<(bool, String)>,
+    pub ios_simulator_booting_udid: Option<String>,
+    pub ios_simulator_boot_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 impl App {
-    pub fn new(rt: tokio::runtime::Handle, devices: Vec<AdbDevice>) -> Self {
+    pub fn new(rt: tokio::runtime::Handle, devices: Vec<ConnectedDevice>) -> Self {
         // Try restoring session
         if let Some(app) = Self::try_restore(&rt, &devices) {
             return app;
         }
 
-        let default_device = devices.first().map(|d| d.serial.clone());
+        let default_device = devices.first().map(|d| d.id.clone());
         let mut pane = Pane::new(default_device);
         let id = pane.id;
-        pane.start_logcat(&rt);
+        pane.start_capture(&rt, &devices);
 
         let mut panes = HashMap::new();
         panes.insert(id, pane);
 
-        let device_tracker = Some(crate::adb::spawn_device_tracker(&rt));
+        let device_tracker = Some(crate::capture::spawn_device_tracker(&rt));
 
         Self {
             pane_tree: PaneNode::leaf(id),
@@ -98,6 +110,7 @@ impl App {
             rt,
             show_help: false,
             device_refresh_pending: false,
+            ios_simulator_refresh_pending: false,
             tag_history: Self::load_tag_history(),
             device_tracker,
             show_wireless_dialog: false,
@@ -106,6 +119,11 @@ impl App {
             wireless_connect_host: crate::adb::local_ip_prefix(),
             wireless_status: None,
             qr_pairing: None,
+            show_ios_simulator_dialog: false,
+            ios_simulators: Vec::new(),
+            ios_simulator_status: None,
+            ios_simulator_booting_udid: None,
+            ios_simulator_boot_rx: None,
         }
     }
 
@@ -129,11 +147,11 @@ impl App {
             .panes
             .get(&self.focused_pane)
             .and_then(|p| p.device.clone())
-            .or_else(|| self.devices.first().map(|d| d.serial.clone()));
+            .or_else(|| self.devices.first().map(|d| d.id.clone()));
 
         let mut new_pane = Pane::new(device);
         let new_id = new_pane.id;
-        new_pane.start_logcat(&self.rt);
+        new_pane.start_capture(&self.rt, &self.devices);
 
         self.pane_tree.split(self.focused_pane, dir, new_id);
         self.panes.insert(new_id, new_pane);
@@ -145,7 +163,7 @@ impl App {
             return;
         }
         if let Some(mut pane) = self.panes.remove(&id) {
-            pane.stop_logcat();
+            pane.stop_capture();
         }
         self.pane_tree.remove(id);
         let ids = self.pane_tree.pane_ids();
@@ -268,6 +286,9 @@ impl App {
                 Some(SessionPane {
                     device: pane.device.clone(),
                     package: pane.filter.package.clone(),
+                    ios_process: pane.ios_process_filter_text.clone(),
+                    ios_subsystem: pane.ios_subsystem_filter_text.clone(),
+                    ios_category: pane.ios_category_filter_text.clone(),
                     tag_input: pane.tag_input.clone(),
                     min_level: pane.filter.min_level,
                     hide_vendor_noise: pane.filter.hide_vendor_noise,
@@ -294,7 +315,7 @@ impl App {
         }
     }
 
-    fn try_restore(rt: &tokio::runtime::Handle, devices: &[AdbDevice]) -> Option<Self> {
+    fn try_restore(rt: &tokio::runtime::Handle, devices: &[ConnectedDevice]) -> Option<Self> {
         let path = Self::session_path();
         let json = std::fs::read_to_string(&path).ok()?;
         let session: Session = serde_json::from_str(&json).ok()?;
@@ -312,23 +333,27 @@ impl App {
             let device = sp
                 .device
                 .as_ref()
-                .filter(|serial| devices.iter().any(|d| &d.serial == *serial))
+                .filter(|id| devices.iter().any(|d| &d.id == *id))
                 .cloned()
-                .or_else(|| devices.first().map(|d| d.serial.clone()));
+                .or_else(|| devices.first().map(|d| d.id.clone()));
 
             let mut pane = Pane::new(device);
             pane.filter.min_level = sp.min_level;
             pane.filter.hide_vendor_noise = sp.hide_vendor_noise;
             pane.filter.package = sp.package.clone();
+            pane.ios_process_filter_text = sp.ios_process.clone();
+            pane.ios_subsystem_filter_text = sp.ios_subsystem.clone();
+            pane.ios_category_filter_text = sp.ios_category.clone();
             pane.tag_input = sp.tag_input.clone();
             pane.prev_tag_input = sp.tag_input.clone();
             pane.package_filter_text = sp.package.clone().unwrap_or_default();
             pane.word_wrap = sp.word_wrap;
             pane.apply_tag_filter();
+            pane.apply_ios_filters();
             if sp.package.is_some() {
                 pane.package_refresh_pending = true;
             }
-            pane.start_logcat(rt);
+            pane.start_capture(rt, devices);
 
             pane_ids.push(pane.id);
             panes.insert(pane.id, pane);
@@ -340,7 +365,7 @@ impl App {
             .copied()
             .unwrap_or(pane_ids[0]);
 
-        let device_tracker = Some(crate::adb::spawn_device_tracker(rt));
+        let device_tracker = Some(crate::capture::spawn_device_tracker(rt));
 
         Some(Self {
             pane_tree: tree,
@@ -350,6 +375,7 @@ impl App {
             rt: rt.clone(),
             show_help: false,
             device_refresh_pending: false,
+            ios_simulator_refresh_pending: false,
             tag_history: Self::load_tag_history(),
             device_tracker,
             show_wireless_dialog: false,
@@ -358,6 +384,11 @@ impl App {
             wireless_connect_host: crate::adb::local_ip_prefix(),
             wireless_status: None,
             qr_pairing: None,
+            show_ios_simulator_dialog: false,
+            ios_simulators: Vec::new(),
+            ios_simulator_status: None,
+            ios_simulator_booting_udid: None,
+            ios_simulator_boot_rx: None,
         })
     }
 

@@ -18,42 +18,58 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
 
+            let has_android_devices = app
+                .devices
+                .iter()
+                .any(|device| device.supports_wireless_debugging());
+
             let pane = match app.panes.get_mut(&pane_id) {
                 Some(p) => p,
                 None => return,
             };
 
-            // Device selector
             let device_label = pane
                 .device
                 .as_ref()
-                .and_then(|serial| {
+                .and_then(|device_id| {
                     app.devices
                         .iter()
-                        .find(|d| d.serial == *serial)
-                        .map(|d| d.friendly_name())
+                        .find(|device| device.id == *device_id)
+                        .map(|device| device.display_name())
                 })
                 .unwrap_or_else(|| "No device".to_string());
+
+            let selected_device = pane
+                .device
+                .as_ref()
+                .and_then(|device_id| app.devices.iter().find(|device| device.id == *device_id))
+                .cloned();
 
             ui.label(RichText::new("📱").size(14.0));
             egui::ComboBox::from_id_salt("device_combo")
                 .selected_text(&device_label)
-                .width(120.0)
+                .width(180.0)
                 .show_ui(ui, |ui| {
-                    for dev in &app.devices {
-                        let is_selected = pane.device.as_ref() == Some(&dev.serial);
+                    for device in &app.devices {
+                        let is_selected = pane.device.as_ref() == Some(&device.id);
                         if ui
-                            .selectable_label(is_selected, dev.friendly_name())
+                            .selectable_label(is_selected, device.display_name())
                             .clicked()
                         {
-                            pane.stop_logcat();
+                            pane.stop_capture();
                             pane.clear();
-                            pane.device = Some(dev.serial.clone());
+                            pane.device = Some(device.id.clone());
                             pane.pid_filter = None;
                             pane.filter.package = None;
+                            pane.filter.ios_process = None;
+                            pane.filter.ios_subsystem = None;
+                            pane.filter.ios_category = None;
                             pane.packages.clear();
                             pane.package_filter_text.clear();
-                            pane.start_logcat(&app.rt);
+                            pane.ios_process_filter_text.clear();
+                            pane.ios_subsystem_filter_text.clear();
+                            pane.ios_category_filter_text.clear();
+                            pane.start_capture(&app.rt, &app.devices);
                         }
                     }
                     ui.separator();
@@ -62,154 +78,192 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                     }
                 });
 
+            if has_android_devices {
+                if ui
+                    .add(egui::Button::new(RichText::new("📡").size(14.0)))
+                    .on_hover_text("Wireless debugging")
+                    .clicked()
+                {
+                    app.show_wireless_dialog = true;
+                }
+            }
+
+            #[cfg(target_os = "macos")]
             if ui
-                .add(egui::Button::new(RichText::new("📡").size(14.0)))
-                .on_hover_text("Wireless debugging")
+                .add(egui::Button::new(RichText::new("🍎").size(14.0)))
+                .on_hover_text("Boot iOS Simulator")
                 .clicked()
             {
-                app.show_wireless_dialog = true;
+                app.show_ios_simulator_dialog = true;
+                app.ios_simulator_refresh_pending = true;
             }
 
             ui.separator();
 
-            // Package filter
-            ui.label(RichText::new("📦").size(14.0));
-            let pkg_hint = pane.filter.package.as_deref().unwrap_or("Package...");
-            let pkg_resp = ui.add(
-                egui::TextEdit::singleline(&mut pane.package_filter_text)
-                    .desired_width(120.0)
-                    .hint_text(pkg_hint)
-                    .id(ui.id().with("pkg_input")),
-            );
+            if selected_device
+                .as_ref()
+                .is_some_and(|device| device.supports_package_filter())
+            {
+                ui.label(RichText::new("📦").size(14.0));
+                let pkg_hint = pane.filter.package.as_deref().unwrap_or("Package...");
+                let pkg_resp = ui.add(
+                    egui::TextEdit::singleline(&mut pane.package_filter_text)
+                        .desired_width(120.0)
+                        .hint_text(pkg_hint)
+                        .id(ui.id().with("pkg_input")),
+                );
 
-            if pkg_resp.gained_focus() && pane.packages.is_empty() && pane.device.is_some() {
-                pane.package_refresh_pending = true;
-                pane.pkg_selection_index = -1;
-            }
-
-            if pkg_resp.changed() {
-                pane.pkg_selection_index = 0;
-                // If the user cleared the text (backspace/select-all+delete), remove the filter
-                if pane.package_filter_text.is_empty() && pane.filter.package.is_some() {
-                    pane.filter.package = None;
-                    pane.pid_filter = None;
-                    pane.rebuild_filtered();
+                if pkg_resp.gained_focus() && pane.packages.is_empty() && pane.device.is_some() {
+                    pane.package_refresh_pending = true;
+                    pane.pkg_selection_index = -1;
                 }
-            }
 
-            let popup_id = ui.id().with("pkg_popup");
-            let has_focus = pkg_resp.has_focus();
-            let just_lost_focus = pkg_resp.lost_focus();
-            let filter_text = pane.package_filter_text.to_lowercase();
-
-            // Build matching packages list always (needed for Enter after lost_focus)
-            let matching: Vec<String> = if filter_text.is_empty() {
-                pane.packages.iter().take(20).cloned().collect()
-            } else {
-                pane.packages
-                    .iter()
-                    .filter(|p| p.to_lowercase().contains(&filter_text))
-                    .take(15)
-                    .cloned()
-                    .collect()
-            };
-
-            // Handle arrow keys while text field has focus
-            if has_focus && !matching.is_empty() {
-                let pressed_down = ui.input(|i| i.key_pressed(Key::ArrowDown));
-                let pressed_up = ui.input(|i| i.key_pressed(Key::ArrowUp));
-
-                if pressed_down {
-                    pane.pkg_selection_index =
-                        ((pane.pkg_selection_index + 1) as usize % matching.len()) as i32;
-                }
-                if pressed_up {
-                    if pane.pkg_selection_index <= 0 {
-                        pane.pkg_selection_index = matching.len() as i32 - 1;
-                    } else {
-                        pane.pkg_selection_index -= 1;
+                if pkg_resp.changed() {
+                    pane.pkg_selection_index = 0;
+                    if pane.package_filter_text.is_empty() && pane.filter.package.is_some() {
+                        pane.filter.package = None;
+                        pane.pid_filter = None;
+                        pane.rebuild_filtered();
                     }
                 }
-            }
 
-            // Enter selects: singleline TextEdit loses focus on Enter, so detect that
-            if just_lost_focus && ui.input(|i| i.key_pressed(Key::Enter)) && !matching.is_empty() {
-                let idx = if pane.pkg_selection_index >= 0 {
-                    pane.pkg_selection_index as usize
+                let popup_id = ui.id().with("pkg_popup");
+                let has_focus = pkg_resp.has_focus();
+                let just_lost_focus = pkg_resp.lost_focus();
+                let filter_text = pane.package_filter_text.to_lowercase();
+
+                let matching: Vec<String> = if filter_text.is_empty() {
+                    pane.packages.iter().take(20).cloned().collect()
                 } else {
-                    0
+                    pane.packages
+                        .iter()
+                        .filter(|p| p.to_lowercase().contains(&filter_text))
+                        .take(15)
+                        .cloned()
+                        .collect()
                 };
-                if idx < matching.len() {
-                    let pkg = matching[idx].clone();
-                    pane.filter.package = Some(pkg.clone());
-                    pane.package_filter_text = pkg;
-                    pane.pkg_selection_index = -1;
-                    pane.package_refresh_pending = true;
-                }
-            }
 
-            let mut pkg_cleared = false;
-            if has_focus && !matching.is_empty() {
-                let sel_idx = pane.pkg_selection_index;
-                egui::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &pkg_resp,
-                    egui::PopupCloseBehavior::CloseOnClickOutside,
-                    |ui| {
-                        ui.set_min_width(250.0);
-                        ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                            if ui
-                                .selectable_label(
-                                    false,
-                                    RichText::new("✕ Clear filter").color(OD_FG_DIM),
-                                )
-                                .clicked()
-                            {
-                                pane.filter.package = None;
-                                pane.pid_filter = None;
-                                pane.package_filter_text.clear();
-                                pane.pkg_selection_index = -1;
-                                pane.rebuild_filtered();
-                                pkg_cleared = true;
-                            }
-                            ui.separator();
-                            for (i, pkg) in matching.iter().enumerate() {
-                                let is_kb_selected = sel_idx >= 0 && i == sel_idx as usize;
-                                let is_current = pane.filter.package.as_ref() == Some(pkg);
-                                let label = if is_kb_selected {
-                                    RichText::new(pkg).strong()
-                                } else {
-                                    RichText::new(pkg)
-                                };
+                if has_focus && !matching.is_empty() {
+                    let pressed_down = ui.input(|i| i.key_pressed(Key::ArrowDown));
+                    let pressed_up = ui.input(|i| i.key_pressed(Key::ArrowUp));
+
+                    if pressed_down {
+                        pane.pkg_selection_index =
+                            ((pane.pkg_selection_index + 1) as usize % matching.len()) as i32;
+                    }
+                    if pressed_up {
+                        if pane.pkg_selection_index <= 0 {
+                            pane.pkg_selection_index = matching.len() as i32 - 1;
+                        } else {
+                            pane.pkg_selection_index -= 1;
+                        }
+                    }
+                }
+
+                if just_lost_focus
+                    && ui.input(|i| i.key_pressed(Key::Enter))
+                    && !matching.is_empty()
+                {
+                    let idx = if pane.pkg_selection_index >= 0 {
+                        pane.pkg_selection_index as usize
+                    } else {
+                        0
+                    };
+                    if idx < matching.len() {
+                        let pkg = matching[idx].clone();
+                        pane.filter.package = Some(pkg.clone());
+                        pane.package_filter_text = pkg;
+                        pane.pkg_selection_index = -1;
+                        pane.package_refresh_pending = true;
+                    }
+                }
+
+                let mut pkg_cleared = false;
+                if has_focus && !matching.is_empty() {
+                    let sel_idx = pane.pkg_selection_index;
+                    egui::popup_below_widget(
+                        ui,
+                        popup_id,
+                        &pkg_resp,
+                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                        |ui| {
+                            ui.set_min_width(250.0);
+                            ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                                 if ui
-                                    .selectable_label(is_current || is_kb_selected, label)
+                                    .selectable_label(
+                                        false,
+                                        RichText::new("✕ Clear filter").color(OD_FG_DIM),
+                                    )
                                     .clicked()
                                 {
-                                    pane.filter.package = Some(pkg.clone());
-                                    pane.package_filter_text = pkg.clone();
+                                    pane.filter.package = None;
+                                    pane.pid_filter = None;
+                                    pane.package_filter_text.clear();
                                     pane.pkg_selection_index = -1;
-                                    pane.package_refresh_pending = true;
+                                    pane.rebuild_filtered();
+                                    pkg_cleared = true;
                                 }
-                            }
-                        });
-                    },
-                );
-                if pkg_cleared {
-                    ui.memory_mut(|m| m.close_popup());
-                    pkg_resp.surrender_focus();
-                } else {
-                    ui.memory_mut(|m| m.open_popup(popup_id));
+                                ui.separator();
+                                for (i, pkg) in matching.iter().enumerate() {
+                                    let is_kb_selected = sel_idx >= 0 && i == sel_idx as usize;
+                                    let is_current = pane.filter.package.as_ref() == Some(pkg);
+                                    let label = if is_kb_selected {
+                                        RichText::new(pkg).strong()
+                                    } else {
+                                        RichText::new(pkg)
+                                    };
+                                    if ui
+                                        .selectable_label(is_current || is_kb_selected, label)
+                                        .clicked()
+                                    {
+                                        pane.filter.package = Some(pkg.clone());
+                                        pane.package_filter_text = pkg.clone();
+                                        pane.pkg_selection_index = -1;
+                                        pane.package_refresh_pending = true;
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    if pkg_cleared {
+                        ui.memory_mut(|m| m.close_popup());
+                        pkg_resp.surrender_focus();
+                    } else {
+                        ui.memory_mut(|m| m.open_popup(popup_id));
+                    }
                 }
-            }
 
-            if pkg_resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-                pane.filter.package = None;
-                pane.pid_filter = None;
-                pane.package_filter_text.clear();
-                pane.pkg_selection_index = -1;
-                pane.rebuild_filtered();
-                pkg_resp.surrender_focus();
+                if pkg_resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                    pane.filter.package = None;
+                    pane.pid_filter = None;
+                    pane.package_filter_text.clear();
+                    pane.pkg_selection_index = -1;
+                    pane.rebuild_filtered();
+                    pkg_resp.surrender_focus();
+                }
+            } else if selected_device
+                .as_ref()
+                .is_some_and(|device| device.supports_ios_filters())
+            {
+                ui.label(RichText::new("⚙").size(14.0));
+                let process_resp = ui.add(
+                    egui::TextEdit::singleline(&mut pane.ios_process_filter_text)
+                        .desired_width(120.0)
+                        .hint_text("Process"),
+                );
+                let subsystem_resp = ui.add(
+                    egui::TextEdit::singleline(&mut pane.ios_subsystem_filter_text)
+                        .desired_width(140.0)
+                        .hint_text("Subsystem"),
+                );
+                let category_resp = ui.add(
+                    egui::TextEdit::singleline(&mut pane.ios_category_filter_text)
+                        .desired_width(120.0)
+                        .hint_text("Category"),
+                );
+                if process_resp.changed() || subsystem_resp.changed() || category_resp.changed() {
+                    pane.apply_ios_filters();
+                }
             }
 
             ui.separator();

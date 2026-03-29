@@ -1,6 +1,8 @@
 mod adb;
 mod app;
+mod capture;
 mod filter;
+mod ios;
 mod log_entry;
 mod mcp;
 mod pane;
@@ -27,49 +29,42 @@ const APP_NAME: &str = "CatPane";
 /// Matches by friendly name so the correct physical device is kept.
 fn update_devices(
     app: &mut app::App,
-    new_devices: Vec<adb::AdbDevice>,
+    new_devices: Vec<capture::ConnectedDevice>,
     rt: &tokio::runtime::Handle,
 ) {
-    // Build friendly-name → new serial map before swapping
     let new_by_name: std::collections::HashMap<String, String> = new_devices
         .iter()
-        .map(|d| (d.friendly_name(), d.serial.clone()))
+        .map(|d| (format!("{}::{}", d.platform.label(), d.name), d.id.clone()))
         .collect();
 
     let old_devices = std::mem::replace(&mut app.devices, new_devices);
 
     let pane_ids: Vec<_> = app.panes.keys().copied().collect();
     for pid in pane_ids {
-        let serial = match app.panes.get(&pid).and_then(|p| p.device.clone()) {
-            Some(s) => s,
+        let device_id = match app.panes.get(&pid).and_then(|p| p.device.clone()) {
+            Some(id) => id,
             None => continue,
         };
-        if app.devices.iter().any(|d| d.serial == serial) {
-            // Serial still valid — but if the device just reappeared
-            // (wasn't in old list), we need to restart logcat because
-            // the old process died when the device disconnected.
-            let was_present_before = old_devices.iter().any(|d| d.serial == serial);
+        if app.devices.iter().any(|d| d.id == device_id) {
+            let was_present_before = old_devices.iter().any(|d| d.id == device_id);
             if was_present_before {
                 continue;
             }
-            // Device reappeared — restart logcat
             if let Some(pane) = app.panes.get_mut(&pid) {
-                pane.stop_logcat();
-                pane.start_logcat(rt);
+                pane.stop_capture();
+                pane.start_capture(rt, &app.devices);
             }
             continue;
         }
-        // Find the old device entry to get its friendly name
-        let friendly = match old_devices.iter().find(|d| d.serial == serial) {
-            Some(d) => d.friendly_name(),
+        let reconnect_key = match old_devices.iter().find(|d| d.id == device_id) {
+            Some(device) => format!("{}::{}", device.platform.label(), device.name),
             None => continue,
         };
-        // Look for a device with the same friendly name in the new list
-        if let Some(new_serial) = new_by_name.get(&friendly) {
+        if let Some(new_id) = new_by_name.get(&reconnect_key) {
             if let Some(pane) = app.panes.get_mut(&pid) {
-                pane.device = Some(new_serial.clone());
-                pane.stop_logcat();
-                pane.start_logcat(rt);
+                pane.device = Some(new_id.clone());
+                pane.stop_capture();
+                pane.start_capture(rt, &app.devices);
             }
         }
     }
@@ -111,12 +106,43 @@ impl eframe::App for CatPaneApp {
 
             if self.app.device_refresh_pending {
                 self.app.device_refresh_pending = false;
-                let devices = self.rt_handle.block_on(adb::list_devices());
+                let devices = self.rt_handle.block_on(capture::list_devices());
                 update_devices(&mut self.app, devices, &self.rt_handle);
             }
 
-            // Auto-refresh devices from track-devices
-            let mut tracker_devices: Option<Vec<adb::AdbDevice>> = None;
+            if self.app.ios_simulator_refresh_pending {
+                self.app.ios_simulator_refresh_pending = false;
+                self.app.ios_simulators = self.rt_handle.block_on(ios::list_available_simulators());
+            }
+
+            let boot_result = if let Some(rx) = &mut self.app.ios_simulator_boot_rx {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        Some(Err("Simulator boot task ended unexpectedly".to_string()))
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(result) = boot_result {
+                self.app.ios_simulator_boot_rx = None;
+                self.app.ios_simulator_booting_udid = None;
+                match result {
+                    Ok(msg) => {
+                        self.app.ios_simulator_status = Some((true, msg));
+                        self.app.ios_simulator_refresh_pending = true;
+                        self.app.device_refresh_pending = true;
+                    }
+                    Err(msg) => {
+                        self.app.ios_simulator_status = Some((false, msg));
+                        self.app.ios_simulator_refresh_pending = true;
+                    }
+                }
+            }
+
+            let mut tracker_devices: Option<Vec<capture::ConnectedDevice>> = None;
             if let Some(tracker) = &mut self.app.device_tracker {
                 while let Ok(devices) = tracker.try_recv() {
                     tracker_devices = Some(devices);
@@ -126,25 +152,22 @@ impl eframe::App for CatPaneApp {
                 update_devices(&mut self.app, devices, &self.rt_handle);
             }
 
-            // Auto-restart logcat for panes whose logcat channel died
-            // (e.g. device briefly disconnected, adb crashed) but the
-            // device is still in the current device list.
-            // A 3-second cooldown prevents rapid-fire respawn loops when
-            // the device isn't truly ready yet.
+            // Auto-restart capture for panes whose stream died but whose
+            // selected device is still available.
             {
                 let pane_ids: Vec<_> = self.app.panes.keys().copied().collect();
                 for pid in pane_ids {
                     let should_restart = self.app.panes.get(&pid).is_some_and(|p| {
-                        p.logcat_handle.is_none()
+                        p.capture_handle.is_none()
                             && !p.paused
-                            && p.last_logcat_restart.elapsed() >= std::time::Duration::from_secs(3)
-                            && p.device.as_ref().is_some_and(|serial| {
-                                self.app.devices.iter().any(|d| &d.serial == serial)
+                            && p.last_capture_restart.elapsed() >= std::time::Duration::from_secs(3)
+                            && p.device.as_ref().is_some_and(|device_id| {
+                                self.app.devices.iter().any(|d| &d.id == device_id)
                             })
                     });
                     if should_restart {
                         if let Some(pane) = self.app.panes.get_mut(&pid) {
-                            pane.start_logcat(&self.rt_handle);
+                            pane.start_capture(&self.rt_handle, &self.app.devices);
                         }
                     }
                 }
@@ -162,7 +185,7 @@ impl eframe::App for CatPaneApp {
                     continue;
                 }
 
-                let (device_serial, pkg_name) = {
+                let (device_id, pkg_name) = {
                     let pane = self.app.panes.get(&pid).unwrap();
                     (pane.device.clone(), pane.filter.package.clone())
                 };
@@ -172,15 +195,19 @@ impl eframe::App for CatPaneApp {
                     pane.last_pid_poll = std::time::Instant::now();
                 }
 
-                if let Some(device) = device_serial {
-                    let packages = self.rt_handle.block_on(adb::list_packages(&device));
+                if let Some(device) = device_id {
+                    let packages = self
+                        .rt_handle
+                        .block_on(capture::list_packages(&device, &self.app.devices));
                     if let Some(pane) = self.app.panes.get_mut(&pid) {
                         pane.packages = packages;
                     }
                     if let Some(pkg) = pkg_name {
-                        let pid_val = self
-                            .rt_handle
-                            .block_on(adb::get_pid_for_package(&device, &pkg));
+                        let pid_val = self.rt_handle.block_on(capture::get_pid_for_package(
+                            &device,
+                            &pkg,
+                            &self.app.devices,
+                        ));
                         if let Some(pane) = self.app.panes.get_mut(&pid) {
                             pane.pid_filter = pid_val;
                             pane.rebuild_filtered();
@@ -196,12 +223,17 @@ impl eframe::App for CatPaneApp {
                     p.filter.package.is_some()
                         && !p.package_refresh_pending
                         && p.last_pid_poll.elapsed() >= PID_REPOLL_INTERVAL
+                        && p.device.as_ref().is_some_and(|device_id| {
+                            self.app.devices.iter().any(|device| {
+                                device.id == *device_id && device.supports_package_filter()
+                            })
+                        })
                 });
                 if !should_repoll {
                     continue;
                 }
 
-                let (device_serial, pkg_name) = {
+                let (device_id, pkg_name) = {
                     let pane = self.app.panes.get(&pid).unwrap();
                     (pane.device.clone(), pane.filter.package.clone())
                 };
@@ -210,10 +242,12 @@ impl eframe::App for CatPaneApp {
                     pane.last_pid_poll = std::time::Instant::now();
                 }
 
-                if let (Some(device), Some(pkg)) = (device_serial, pkg_name) {
-                    let new_pid = self
-                        .rt_handle
-                        .block_on(adb::get_pid_for_package(&device, &pkg));
+                if let (Some(device), Some(pkg)) = (device_id, pkg_name) {
+                    let new_pid = self.rt_handle.block_on(capture::get_pid_for_package(
+                        &device,
+                        &pkg,
+                        &self.app.devices,
+                    ));
                     if let Some(pane) = self.app.panes.get_mut(&pid) {
                         if pane.pid_filter != new_pid {
                             pane.pid_filter = new_pid;
@@ -356,6 +390,11 @@ impl CatPaneApp {
             self.app.show_help = !self.app.show_help;
         } else if *id == muda::MenuId::from("wireless_debug") {
             self.app.show_wireless_dialog = !self.app.show_wireless_dialog;
+        } else if *id == muda::MenuId::from("boot_ios_simulator") {
+            self.app.show_ios_simulator_dialog = !self.app.show_ios_simulator_dialog;
+            if self.app.show_ios_simulator_dialog {
+                self.app.ios_simulator_refresh_pending = true;
+            }
         }
     }
 }
@@ -399,6 +438,7 @@ fn setup_menu() -> Menu {
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("wireless_debug", "Wireless Debug…", true, None),
+            &MenuItem::with_id("boot_ios_simulator", "Boot iOS Simulator…", true, None),
         ],
     )
     .unwrap();
@@ -557,7 +597,7 @@ fn main() -> eframe::Result<()> {
         .build()
         .expect("Failed to create tokio runtime");
 
-    let devices = rt.block_on(adb::list_devices());
+    let devices = rt.block_on(capture::list_devices());
     let rt_handle = rt.handle().clone();
     let is_dark = is_system_dark_mode();
     let menu = setup_menu();
