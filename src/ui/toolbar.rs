@@ -369,7 +369,7 @@ pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             let tag_resp = ui.add(
                 egui::TextEdit::singleline(&mut tag_input)
                     .desired_width(ui.available_width() - 100.0)
-                    .hint_text("tag:Name  tag-:Exclude  tag~:Regex")
+                    .hint_text("tag:Name  tag-:Exclude  tag~:Regex  Name:V *:E")
                     .id(ui.id().with("tag_input")),
             );
 
@@ -548,39 +548,95 @@ pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
 }
 
 fn extract_partial_tag_value(input: &str) -> &str {
-    let prefixes = ["tag-:", "tag~:", "tag:"];
-    let mut last_prefix_end = None;
-
-    for prefix in &prefixes {
-        if let Some(pos) = input.rfind(prefix) {
-            let end = pos + prefix.len();
-            if last_prefix_end.map_or(true, |prev| end > prev) {
-                last_prefix_end = Some(end);
-            }
-        }
-    }
-
-    match last_prefix_end {
-        Some(end) => &input[end..],
-        None => "",
+    if let Some((start, end)) = current_tag_value_range(input) {
+        &input[start..end]
+    } else {
+        ""
     }
 }
 
 fn replace_partial_tag_value(input: &mut String, replacement: &str) {
-    let prefixes = ["tag-:", "tag~:", "tag:"];
-    let mut last_prefix_end = None;
+    let Some((start, end)) = current_tag_value_range(input) else {
+        return;
+    };
+    let suffix = input[end..].to_string();
+    let append_level_separator = should_append_level_separator(input);
 
+    input.truncate(start);
+    input.push_str(replacement);
+    input.push_str(&suffix);
+    if append_level_separator {
+        input.push(':');
+    }
+}
+
+fn current_tag_value_range(input: &str) -> Option<(usize, usize)> {
+    let token_start = input
+        .rfind(char::is_whitespace)
+        .map_or(0, |pos| pos.saturating_add(1));
+    let token = &input[token_start..];
+    if token.is_empty() {
+        return None;
+    }
+
+    let prefixes = ["tag-:", "tag~:", "tag:"];
     for prefix in &prefixes {
-        if let Some(pos) = input.rfind(prefix) {
-            let end = pos + prefix.len();
-            if last_prefix_end.map_or(true, |prev| end > prev) {
-                last_prefix_end = Some(end);
-            }
+        if token.starts_with(prefix) {
+            let start = token_start + prefix.len();
+            return (start < input.len()).then_some((start, input.len()));
         }
     }
 
-    if let Some(end) = last_prefix_end {
-        input.truncate(end);
-        input.push_str(replacement);
+    let tag_end = token.find(':').unwrap_or(token.len());
+    let tag = &token[..tag_end];
+    if tag.is_empty() || tag == "*" {
+        None
+    } else {
+        Some((token_start, token_start + tag.len()))
+    }
+}
+
+fn should_append_level_separator(input: &str) -> bool {
+    let token_start = input
+        .rfind(char::is_whitespace)
+        .map_or(0, |pos| pos.saturating_add(1));
+    let token = &input[token_start..];
+
+    !token.is_empty()
+        && !token.contains(':')
+        && !["tag-:", "tag~:", "tag:"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_partial_tag_value, replace_partial_tag_value};
+
+    #[test]
+    fn extracts_partial_value_for_tag_level_token() {
+        assert_eq!(extract_partial_tag_value("CallMan:V"), "CallMan");
+        assert_eq!(extract_partial_tag_value("*:E"), "");
+    }
+
+    #[test]
+    fn preserves_level_suffix_when_autocompleting_tag_level_token() {
+        let mut input = String::from("CallMan:V");
+        replace_partial_tag_value(&mut input, "CallManagerService");
+        assert_eq!(input, "CallManagerService:V");
+    }
+
+    #[test]
+    fn appends_level_separator_for_bare_tag_level_completion() {
+        let mut input = String::from("CallMan");
+        replace_partial_tag_value(&mut input, "CallManagerService");
+        assert_eq!(input, "CallManagerService:");
+    }
+
+    #[test]
+    fn keeps_existing_prefixed_tag_autocomplete_behavior() {
+        let mut input = String::from("tag:CallMan");
+        replace_partial_tag_value(&mut input, "CallManagerService");
+        assert_eq!(input, "tag:CallManagerService");
     }
 }

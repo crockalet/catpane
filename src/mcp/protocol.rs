@@ -1,7 +1,7 @@
 use std::fmt;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Map, Number, Value};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Map, Number, Value, json};
 
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const MCP_PROTOCOL_VERSION_2024_11_05: &str = "2024-11-05";
@@ -888,11 +888,10 @@ mod tests {
 
     #[test]
     fn list_tools_result_omits_next_cursor_when_absent() {
-        let result = ListToolsResult::new(vec![Tool::new(
-            "get_selected_logs",
-            JsonSchema::empty_object(),
-        )
-        .with_description("Return selected CatPane log lines")]);
+        let result = ListToolsResult::new(vec![
+            Tool::new("get_selected_logs", JsonSchema::empty_object())
+                .with_description("Return selected CatPane log lines"),
+        ]);
 
         let value = serde_json::to_value(result).expect("tools list result should serialize");
         assert_eq!(

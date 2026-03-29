@@ -10,17 +10,13 @@ use tokio::sync::mpsc;
 pub fn adb_binary() -> &'static str {
     static ADB_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ADB_PATH.get_or_init(|| {
-        let mut candidates: Vec<std::path::PathBuf> = vec![
-            "/opt/homebrew/bin/adb".into(),
-            "/usr/local/bin/adb".into(),
-        ];
+        let mut candidates: Vec<std::path::PathBuf> =
+            vec!["/opt/homebrew/bin/adb".into(), "/usr/local/bin/adb".into()];
         if let Ok(android_home) = std::env::var("ANDROID_HOME") {
             candidates.push(format!("{android_home}/platform-tools/adb").into());
         }
         if let Ok(home) = std::env::var("HOME") {
-            candidates.push(
-                format!("{home}/Library/Android/sdk/platform-tools/adb").into(),
-            );
+            candidates.push(format!("{home}/Library/Android/sdk/platform-tools/adb").into());
         }
 
         for path in &candidates {
@@ -99,7 +95,11 @@ fn deduplicate_devices(devices: Vec<AdbDevice>) -> Vec<AdbDevice> {
 }
 
 pub async fn list_devices() -> Vec<AdbDevice> {
-    let output = match Command::new(adb_binary()).args(["devices", "-l"]).output().await {
+    let output = match Command::new(adb_binary())
+        .args(["devices", "-l"])
+        .output()
+        .await
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };

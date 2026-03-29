@@ -8,10 +8,11 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 
 - **Split panes** — view multiple logcat streams side by side (vertical/horizontal splits)
 - **Multi-window** — open additional windows with ⌘N / Ctrl+N
-- **Tag filters** — Android Studio-style syntax with include, exclude, and regex:
+- **Tag filters** — Android Studio-style syntax with include, exclude, regex, and per-tag levels:
   - `tag:Name` — include only this tag
   - `tag-:Exclude` — hide this tag
   - `tag~:Regex` — regex match on tag
+  - `CallManagerService:V *:E` — show verbose logs for one tag while still showing errors everywhere else
   - Combine multiple: `tag:MyApp tag-:Verbose tag~:Net.*`
 - **Tag autocomplete** — suggests from tags seen in the log stream
 - **Package filter** — filter by app package name with autocomplete from running packages

@@ -25,7 +25,10 @@ pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
                 ("F1".to_string(), "Toggle this help"),
                 (String::new(), ""),
                 ("Right-click".to_string(), "Include/exclude/like tag"),
-                ("Tags".to_string(), "tag:Name  tag-:Excl  tag~:Regex"),
+                (
+                    "Tags".to_string(),
+                    "tag:Name  tag-:Excl  tag~:Regex  Name:V *:E",
+                ),
             ];
 
             egui::Grid::new("help_grid").striped(true).show(ui, |ui| {

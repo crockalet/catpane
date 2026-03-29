@@ -952,7 +952,7 @@ fn get_logs_tool() -> Tool {
                 (
                     "tagQuery",
                     string_property(
-                        "CatPane tag filter syntax, for example `tag:MyTag tag-:Noise tag~:^App`.",
+                        "CatPane tag filter syntax, for example `tag:MyTag tag-:Noise tag~:^App` or `MyTag:V *:E`.",
                     ),
                 ),
                 ("text", string_property("Substring search over tag and message text.")),
