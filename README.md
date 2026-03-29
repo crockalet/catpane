@@ -91,6 +91,20 @@ Example MCP client config using stdio transport:
 
 Use `start_capture` to begin buffering logs for a device, then query them with `get_logs`. `clear_logs` resets the current buffer without stopping capture, and `get_status` shows active captures plus buffer state.
 
+### Agent skill via `vercel-labs/skills`
+
+CatPane also ships a reusable `catpane-logcat` agent skill in `.agents/skills/`. You can install it from your local checkout with [`vercel-labs/skills`](https://github.com/vercel-labs/skills):
+
+```sh
+# Install for GitHub Copilot in the current project
+npx skills add . --agent github-copilot --skill catpane-logcat
+
+# Or install it globally
+npx skills add /absolute/path/to/catpane --agent github-copilot --skill catpane-logcat --global
+```
+
+Replace `github-copilot` with another supported agent if needed. This stays fully local to your machine; no hosted service is required. The skill teaches the agent when to call `get_status`, `start_capture`, `get_logs`, and related tools, but you still need the local CatPane MCP server configured as shown above.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
