@@ -1,24 +1,24 @@
 ---
-name: catpane-logcat
-description: Use this when you need to inspect Android adb/logcat output through CatPane's MCP server, including starting captures, checking status, and querying buffered logs with filters and cursors.
+name: catpane-ios-console
+description: Use this when you need to inspect booted iOS simulator console logs through CatPane's MCP server, including starting captures, checking status, and querying buffered logs with filters and cursors.
 ---
 
-# CatPane Android logcat MCP
+# CatPane iOS simulator console MCP
 
-Use this skill when you need Android logcat output from CatPane's MCP runtime. It is for live debugging, reproductions, and incremental monitoring of Android device logs.
+Use this skill when you need iOS simulator console logs from CatPane's MCP runtime. It is for live debugging, reproductions, and incremental monitoring of iOS simulator output.
 
 ## Use it when
 
 - you need to discover whether a useful capture already exists
-- you need to start a scoped capture for one Android device, app, or PID
-- you need focused log queries instead of dumping raw logcat
-- you need to poll for new Android logs during an investigation
+- you need to start a capture for a booted iOS simulator
+- you need focused log queries instead of dumping raw console output
+- you need to poll for new logs during an investigation
 
 ## Tool surface
 
-- `get_status` — inspect captures and optionally include connected devices
-- `list_devices` — list currently connected Android devices
-- `start_capture` — start buffering logcat for a device; use `package` or `pid` to scope
+- `get_status` — inspect captures and optionally include booted simulators
+- `list_devices` — list currently booted iOS simulators
+- `start_capture` — start buffering console logs for a simulator
 - `get_logs` — read buffered logs with filters and cursor pagination
 - `clear_logs` — reset the buffered window for a capture without stopping it
 - `stop_capture` — stop and remove a capture
@@ -37,17 +37,17 @@ Supporting docs:
    - If a suitable capture already exists and is `running`, reuse it.
    - If you only need device identifiers, `list_devices` is the lighter call.
 2. **Start capture only when needed.**
-   - Call `start_capture` with `device` when multiple devices may be connected.
-   - Use either `package` or `pid` to scope the capture to one app.
-   - Use `restart: true` only when replacing an existing capture on the same device.
+   - Call `start_capture` with `device` when multiple simulators are booted.
+   - Use `restart: true` only when replacing an existing capture on the same simulator.
 3. **Query with focused filters.**
-   - Start with `limit`, `minLevel`, `tagQuery`, and `text`.
+   - Start with `limit`, `minLevel`, and `text`.
+   - Use `process`, `subsystem`, and `category` to narrow results to specific system components.
    - Prefer targeted queries over large unfiltered pulls.
 4. **Page with cursors.**
    - `get_logs` is cursor-based.
    - Reuse the same `order`, pass `page.nextCursor` as the next `cursor`, and stop when `page.hasMore` is false.
 5. **Use `since` for incremental polling.**
-   - Keep the last processed threadtime timestamp.
+   - Keep the last processed timestamp.
    - Pass it back as `since` on the next call.
    - `since` is inclusive, so expect one boundary overlap and dedupe by `seq` if needed.
 6. **Clear logs for a fresh observation window.**
@@ -63,12 +63,11 @@ Supporting docs:
   - `order: "asc"` returns newer entries with `seq > cursor`
 - Use `page.hasMore` to decide whether to continue paging. `page.nextCursor` is still the correct next anchor.
 - `minLevel` is a threshold, not an exact match. Example: `warn` returns `warn`, `error`, and `fatal`.
-- `tagQuery` uses CatPane syntax:
-  - `tag:ActivityManager` — exact include
-  - `tag-:chatty` — exact exclude
-  - `tag~:^(MyApp|Auth)` — regex include
-- `text` is a case-insensitive substring filter over tag and message.
-- `since` must use logcat threadtime format: `MM-DD HH:MM:SS.mmm`
+- `text` is a case-insensitive substring filter over process name, subsystem, category, and message.
+- `process` is a case-insensitive substring filter on the originating process name.
+- `subsystem` is a case-insensitive substring filter on the logging subsystem.
+- `category` is a case-insensitive substring filter on the logging category.
+- `since` must use the format: `MM-DD HH:MM:SS.mmm`
 
 ## Quick start
 
@@ -84,8 +83,7 @@ Supporting docs:
 
 ```json
 {
-  "device": "emulator-5554",
-  "package": "com.example.app"
+  "device": "iPhone 16 Pro"
 }
 ```
 
@@ -93,11 +91,12 @@ Supporting docs:
 
 ```json
 {
-  "device": "emulator-5554",
+  "device": "iPhone 16 Pro",
   "order": "desc",
   "limit": 100,
   "minLevel": "error",
-  "tagQuery": "tag~:^(MyApp|Auth) tag-:OkHttp",
+  "process": "MyApp",
+  "subsystem": "com.example.app",
   "text": "timeout"
 }
 ```

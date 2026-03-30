@@ -2,50 +2,45 @@
 
 ## `start_capture`
 
-Use `start_capture` to begin buffering Android logcat for later `get_logs` calls.
+Use `start_capture` to begin buffering iOS simulator console logs for later `get_logs` calls.
 
 ### Key arguments
 
-- `device` — strongly recommended when more than one adb device could be connected
-- `package` — resolve a package name to a PID before capture starts
-- `pid` — explicit PID filter
+- `device` — strongly recommended when more than one simulator is booted
 - `capacity` — ring-buffer size for this capture
-- `restart` — replace an existing capture for the same device
+- `restart` — replace an existing capture for the same simulator
 
-### Example: capture a device
+### Example: capture a simulator
 
 ```json
 {
-  "device": "emulator-5554"
+  "device": "iPhone 16 Pro"
 }
 ```
 
-### Example: capture one package
+### Example: capture with custom capacity
 
 ```json
 {
-  "device": "emulator-5554",
-  "package": "com.example.app",
+  "device": "iPhone 16 Pro",
   "capacity": 20000
 }
 ```
 
-### Example: capture one PID and replace an existing capture
+### Example: replace an existing capture
 
 ```json
 {
-  "device": "emulator-5554",
-  "pid": 12345,
+  "device": "iPhone 16 Pro",
   "restart": true
 }
 ```
 
 ### Notes
 
-- If `device` is omitted, auto-selection only works when exactly one adb device is connected.
-- Use either `pid` or `package`, not both.
-- `package` is resolved to a PID at start time; it is not a live package subscription.
-- If a capture is already running for the same device and `restart` is not `true`, the tool can fail with a conflict.
+- If `device` is omitted, auto-selection only works when exactly one booted simulator is available.
+- `package` and `pid` are not supported for iOS captures.
+- If a capture is already running for the same simulator and `restart` is not `true`, the tool can fail with a conflict.
 - `capacity` is the per-capture ring-buffer size; older logs fall out when the buffer fills.
 
 ## `clear_logs`
@@ -82,7 +77,7 @@ Use `stop_capture` when you are done with a capture and want to remove it from r
 
 ```json
 {
-  "device": "emulator-5554"
+  "device": "iPhone 16 Pro"
 }
 ```
 

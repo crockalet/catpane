@@ -75,7 +75,7 @@ impl McpToolError {
                 "message": self.message,
             }
         });
-        let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| {
+        let text = serde_json::to_string(&payload).unwrap_or_else(|_| {
             "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize tool error\"}}"
                 .to_owned()
         });
@@ -242,7 +242,7 @@ impl GetLogsArgs {
         CaptureSelector::new(self.capture_id.clone(), self.device.clone())
     }
 
-    fn into_query(self) -> Result<(LogQuery, AppliedLogQuery), McpToolError> {
+    fn into_query(self) -> Result<LogQuery, McpToolError> {
         let limit = self.limit.unwrap_or(DEFAULT_GET_LOGS_LIMIT);
         if limit > MAX_GET_LOGS_LIMIT {
             return Err(McpToolError::invalid_params(format!(
@@ -250,8 +250,10 @@ impl GetLogsArgs {
             )));
         }
 
-        let min_level_raw = normalize_optional_string(self.min_level);
-        let min_level = min_level_raw.as_deref().map(parse_log_level).transpose()?;
+        let min_level = normalize_optional_string(self.min_level)
+            .as_deref()
+            .map(parse_log_level)
+            .transpose()?;
         let tag_query = normalize_optional_string(self.tag_query);
         let text = normalize_optional_string(self.text);
         let process = normalize_optional_string(self.process);
@@ -265,10 +267,10 @@ impl GetLogsArgs {
             limit,
             min_level,
             tag_query: None,
-            text: text.clone(),
-            process: process.clone(),
-            subsystem: subsystem.clone(),
-            category: category.clone(),
+            text,
+            process,
+            subsystem,
+            category,
             since: None,
         };
 
@@ -282,21 +284,7 @@ impl GetLogsArgs {
             })?;
         }
 
-        Ok((
-            query,
-            AppliedLogQuery {
-                cursor: self.cursor,
-                order: self.order,
-                limit,
-                min_level: min_level.map(log_level_name).map(str::to_owned),
-                tag_query,
-                text,
-                process,
-                subsystem,
-                category,
-                since,
-            },
-        ))
+        Ok(query)
     }
 }
 
@@ -372,28 +360,6 @@ pub struct CaptureStatus {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppliedLogQuery {
-    pub cursor: Option<u64>,
-    pub order: QueryOrder,
-    pub limit: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag_query: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subsystem: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub since: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LogEntryView {
     pub seq: u64,
     pub timestamp: String,
@@ -404,7 +370,6 @@ pub struct LogEntryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tid: Option<u64>,
     pub level: String,
-    pub level_label: String,
     pub tag: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
@@ -418,14 +383,18 @@ pub struct LogEntryView {
 impl From<BufferedLogEntry> for LogEntryView {
     fn from(buffered: BufferedLogEntry) -> Self {
         let level = buffered.entry.level;
+        let timestamp = buffered.entry.timestamp;
+        let normalized_timestamp = buffered
+            .normalized_timestamp
+            .map(|value| value.to_string())
+            .filter(|normalized| *normalized != timestamp);
         Self {
             seq: buffered.seq,
-            timestamp: buffered.entry.timestamp,
-            normalized_timestamp: buffered.normalized_timestamp.map(|value| value.to_string()),
+            timestamp,
+            normalized_timestamp,
             pid: buffered.entry.pid,
             tid: buffered.entry.tid,
             level: level.as_char().to_string(),
-            level_label: level.label().to_owned(),
             tag: buffered.entry.tag,
             process: buffered.entry.process,
             subsystem: buffered.entry.subsystem,
@@ -446,7 +415,6 @@ pub struct LogPageView {
     pub limit: usize,
     pub order: QueryOrder,
     pub has_more: bool,
-    pub buffer: LogBufferStatus,
 }
 
 impl From<LogPageMeta> for LogPageView {
@@ -460,7 +428,6 @@ impl From<LogPageMeta> for LogPageView {
             limit: value.limit,
             order: value.order.into(),
             has_more: value.has_more,
-            buffer: value.buffer.into(),
         }
     }
 }
@@ -497,7 +464,6 @@ pub struct ClearLogsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct GetLogsResponse {
     pub capture: CaptureStatus,
-    pub query: AppliedLogQuery,
     pub page: LogPageView,
     pub entries: Vec<LogEntryView>,
 }
@@ -820,14 +786,13 @@ impl CaptureRuntime {
     }
 
     fn query_logs(&self, args: GetLogsArgs) -> Result<GetLogsResponse, McpToolError> {
-        let (query, applied_query) = args.into_query()?;
+        let query = args.into_query()?;
         let LogPage { entries, meta } = self.shared.query(&query);
         let mut capture = self.snapshot();
         capture.buffer = meta.buffer.into();
 
         Ok(GetLogsResponse {
             capture,
-            query: applied_query,
             page: meta.into(),
             entries: entries.into_iter().map(LogEntryView::from).collect(),
         })
@@ -997,9 +962,9 @@ fn get_logs_tool() -> Tool {
                     ),
                 ),
                 ("text", string_property("Substring search over tag and message text.")),
-                ("process", string_property("Filter iOS logs by process name substring.")),
-                ("subsystem", string_property("Filter iOS logs by subsystem substring.")),
-                ("category", string_property("Filter iOS logs by category substring.")),
+                ("process", string_property("Filter by process name substring (iOS simulator captures only).")),
+                ("subsystem", string_property("Filter by subsystem substring (iOS simulator captures only).")),
+                ("category", string_property("Filter by category substring (iOS simulator captures only).")),
                 (
                     "since",
                     string_property(
@@ -1046,12 +1011,12 @@ fn start_capture_tool() -> Tool {
                 ),
                 (
                     "pid",
-                    integer_property("Optional Android-only PID filter passed through to adb logcat."),
+                    integer_property("PID filter passed through to adb logcat (Android only)."),
                 ),
                 (
                     "package",
                     string_property(
-                        "Optional Android-only package name to resolve into a PID filter before starting capture.",
+                        "Package name to resolve into a PID filter before starting capture (Android only).",
                     ),
                 ),
                 (
@@ -1182,22 +1147,11 @@ fn parse_log_level(input: &str) -> Result<LogLevel, McpToolError> {
     }
 }
 
-fn log_level_name(level: LogLevel) -> &'static str {
-    match level {
-        LogLevel::Verbose => "verbose",
-        LogLevel::Debug => "debug",
-        LogLevel::Info => "info",
-        LogLevel::Warn => "warn",
-        LogLevel::Error => "error",
-        LogLevel::Fatal => "fatal",
-    }
-}
-
 fn json_success<T>(value: &T) -> Result<CallToolResult, McpToolError>
 where
     T: Serialize,
 {
-    let text = serde_json::to_string_pretty(value).map_err(|err| {
+    let text = serde_json::to_string(value).map_err(|err| {
         McpToolError::internal(format!("failed to serialize tool response: {err}"))
     })?;
     Ok(CallToolResult::success([ToolContent::text(text)]))

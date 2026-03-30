@@ -1,6 +1,6 @@
 # `get_logs`
 
-Use `get_logs` to query buffered Android logcat entries from an existing capture. It is optimized for targeted retrieval, not bulk dumping.
+Use `get_logs` to query buffered iOS simulator console log entries from an existing capture. It is optimized for targeted retrieval, not bulk dumping.
 
 ## Core arguments
 
@@ -9,9 +9,11 @@ Use `get_logs` to query buffered Android logcat entries from an existing capture
 - `limit` — default `100`, maximum `1000`
 - `cursor` — exclusive sequence anchor for pagination
 - `minLevel` — minimum level threshold
-- `tagQuery` — CatPane tag filters
-- `text` — case-insensitive substring across tag and message
-- `since` — inclusive threadtime lower bound in `MM-DD HH:MM:SS.mmm`
+- `text` — case-insensitive substring across process, subsystem, category, and message
+- `process` — case-insensitive substring filter on originating process name
+- `subsystem` — case-insensitive substring filter on logging subsystem
+- `category` — case-insensitive substring filter on logging category
+- `since` — inclusive timestamp lower bound in `MM-DD HH:MM:SS.mmm`
 
 ## Log level filtering
 
@@ -27,32 +29,38 @@ Examples:
 - `minLevel: "warn"` returns `warn`, `error`, and `fatal`
 - `minLevel: "E"` returns `error` and `fatal`
 
-## Tag filter syntax
+## iOS-specific filters
 
-`tagQuery` uses CatPane's tag syntax. Multiple filters are space-separated.
+Use `process`, `subsystem`, and `category` to focus on specific system components:
 
-- `tag:MyTag` — include exact tag
-- `tag-:NoiseTag` — exclude exact tag
-- `tag~:^(MyApp|Auth)` — regex include
+- `process: "MyApp"` — filter to logs from a specific process
+- `subsystem: "com.example.networking"` — filter to a specific logging subsystem
+- `category: "HTTP"` — filter to a specific logging category
 
-Examples:
-
-- `tag:ActivityManager`
-- `tag:MyApp tag-:OkHttp`
-- `tag~:^(MyApp|Auth) tag-:chatty`
-
-These tag filters combine with `minLevel`, `text`, and `since` using AND semantics.
+These filters combine with `minLevel`, `text`, and `since` using AND semantics.
 
 ## Example: focused error query
 
 ```json
 {
-  "device": "emulator-5554",
+  "device": "iPhone 16 Pro",
   "order": "desc",
   "limit": 100,
   "minLevel": "error",
-  "tagQuery": "tag~:^(MyApp|Auth) tag-:OkHttp",
+  "process": "MyApp",
   "text": "timeout"
+}
+```
+
+## Example: filter by subsystem and category
+
+```json
+{
+  "device": "iPhone 16 Pro",
+  "order": "desc",
+  "limit": 50,
+  "subsystem": "com.example.app",
+  "category": "networking"
 }
 ```
 
@@ -75,7 +83,7 @@ These tag filters combine with `minLevel`, `text`, and `since` using AND semanti
   "order": "asc",
   "since": "03-10 06:30:47.000",
   "minLevel": "info",
-  "tagQuery": "tag~:^(MyApp|Auth)"
+  "process": "MyApp"
 }
 ```
 
