@@ -2,6 +2,7 @@ use egui::{self, RichText};
 
 use super::theme::*;
 use crate::app::{App, QrPairStatus, QrPairingState};
+use crate::capture::ConnectedDevice;
 
 pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
     egui::Window::new("CatPane — Keyboard Shortcuts")
@@ -48,15 +49,21 @@ pub fn draw_help_window(ctx: &egui::Context, show: &mut bool) {
 
 pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
     let is_dark = ctx.style().visuals.dark_mode;
+    let mut open = app.show_wireless_dialog;
 
     egui::Window::new("📡 Wireless Debugging")
-        .open(&mut app.show_wireless_dialog)
+        .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(380.0)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(
+                RichText::new(format!("Using adb: {}", crate::adb::adb_binary()))
+                    .size(11.0)
+                    .weak(),
+            );
 
             // === QR Code Pairing ===
             ui.label(RichText::new("Pair with QR code").strong().size(14.0));
@@ -65,11 +72,19 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
 
             // Poll mDNS result if active
             if let Some(qr) = &mut app.qr_pairing {
-                if matches!(qr.status, QrPairStatus::WaitingScan) {
-                    if let Ok(result) = qr.mdns_rx.try_recv() {
-                        match result {
-                            Ok(msg) => qr.status = QrPairStatus::Success(msg),
-                            Err(msg) => qr.status = QrPairStatus::Failed(msg),
+                if matches!(qr.status, QrPairStatus::WaitingScan | QrPairStatus::Pairing(_)) {
+                    if let Ok(event) = qr.mdns_rx.try_recv() {
+                        match event {
+                            crate::adb::QrPairEvent::Status(msg) => {
+                                qr.status = QrPairStatus::Pairing(msg)
+                            }
+                            crate::adb::QrPairEvent::Finished(Ok(msg)) => {
+                                qr.status = QrPairStatus::Success(msg);
+                                app.device_refresh_pending = true;
+                            }
+                            crate::adb::QrPairEvent::Finished(Err(msg)) => {
+                                qr.status = QrPairStatus::Failed(msg)
+                            }
                         }
                     }
                 }
@@ -104,8 +119,18 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                     }
                 }
 
+                let qr_hint = match &qr.status {
+                    QrPairStatus::Success(msg) => wireless_status_hint(true, msg),
+                    QrPairStatus::Failed(msg) => wireless_status_hint(false, msg),
+                    _ => None,
+                };
+                if let Some(hint) = qr_hint {
+                    ui.label(RichText::new(hint).size(11.0).weak());
+                }
+
                 if ui.button("Reset").clicked() {
                     app.qr_pairing = None;
+                    app.wireless_status = None;
                 }
             } else {
                 if ui.button("Generate QR Code").clicked() {
@@ -127,12 +152,11 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                     );
 
                     app.qr_pairing = Some(QrPairingState {
-                        password,
-                        service_name,
                         qr_texture: Some(texture),
                         mdns_rx,
                         status: QrPairStatus::WaitingScan,
                     });
+                    app.wireless_status = None;
                 }
             }
 
@@ -166,10 +190,7 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                     let host = app.wireless_pair_host.clone();
                     let code = app.wireless_pair_code.clone();
                     let result = app.rt.block_on(crate::adb::pair_device(&host, &code));
-                    match result {
-                        Ok(msg) => app.wireless_status = Some((true, msg)),
-                        Err(msg) => app.wireless_status = Some((false, msg)),
-                    }
+                    set_wireless_status(app, result);
                 }
             });
 
@@ -193,9 +214,120 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                 ).clicked() {
                     let host = app.wireless_connect_host.clone();
                     let result = app.rt.block_on(crate::adb::connect_device(&host));
-                    match result {
-                        Ok(msg) => app.wireless_status = Some((true, msg)),
-                        Err(msg) => app.wireless_status = Some((false, msg)),
+                    let success = result.is_ok();
+                    set_wireless_status(app, result);
+                    if success {
+                        app.device_refresh_pending = true;
+                    }
+                }
+            });
+
+            ui.add_space(2.0);
+            ui.collapsing("Recovery tools", |ui| {
+                ui.label(
+                    RichText::new(
+                        "Use these when QR or pairing gets stuck, or when USB works but wireless does not.",
+                    )
+                    .size(11.0)
+                    .weak(),
+                );
+                ui.add_space(2.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Restart ADB server").clicked() {
+                        let result = app.rt.block_on(crate::adb::restart_server());
+                        let success = result.is_ok();
+                        set_wireless_status(app, result);
+                        if success {
+                            app.device_refresh_pending = true;
+                        }
+                    }
+
+                    if ui.button("Refresh devices").clicked() {
+                        app.device_refresh_pending = true;
+                    }
+
+                    if ui.button("Clear status").clicked() {
+                        app.wireless_status = None;
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(RichText::new("USB-assisted fallback").strong().size(13.0));
+                ui.label(
+                    RichText::new(
+                        "If USB debugging works, CatPane can switch the device into TCP/IP mode and try to connect wirelessly on port 5555.",
+                    )
+                    .size(11.0)
+                    .weak(),
+                );
+
+                let usb_devices: Vec<ConnectedDevice> = app
+                    .devices
+                    .iter()
+                    .filter(|device| is_usb_android_device(device))
+                    .cloned()
+                    .collect();
+
+                if app
+                    .wireless_usb_device
+                    .as_ref()
+                    .is_none_or(|selected| !usb_devices.iter().any(|device| &device.id == selected))
+                {
+                    app.wireless_usb_device = usb_devices.first().map(|device| device.id.clone());
+                }
+
+                if usb_devices.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "Connect an Android device over USB to enable the TCP/IP fallback.",
+                        )
+                        .weak(),
+                    );
+                } else {
+                    let selected_label = app
+                        .wireless_usb_device
+                        .as_ref()
+                        .and_then(|selected| {
+                            usb_devices
+                                .iter()
+                                .find(|device| device.id == *selected)
+                                .map(|device| format!("{} — {}", device.display_name(), device.id))
+                        })
+                        .unwrap_or_else(|| "Select USB device".to_string());
+
+                    egui::ComboBox::from_id_salt("wireless_usb_device")
+                        .selected_text(selected_label)
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            for device in &usb_devices {
+                                let label =
+                                    format!("{} — {}", device.display_name(), device.id);
+                                ui.selectable_value(
+                                    &mut app.wireless_usb_device,
+                                    Some(device.id.clone()),
+                                    label,
+                                );
+                            }
+                        });
+
+                    if ui.button("Enable TCP/IP over USB").clicked() {
+                        if let Some(device) = app.wireless_usb_device.clone() {
+                            match app.rt.block_on(crate::adb::enable_tcpip_mode(&device, 5555)) {
+                                Ok(result) => {
+                                    if let Some(host) = result.connect_host {
+                                        app.wireless_connect_host = host;
+                                    }
+                                    app.wireless_status = Some((true, result.message));
+                                    app.device_refresh_pending = true;
+                                }
+                                Err(msg) => {
+                                    app.wireless_status = Some((false, msg));
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -209,6 +341,9 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
                     if is_dark { OD_RED } else { OL_RED }
                 };
                 ui.label(RichText::new(msg.as_str()).color(color).size(12.0));
+                if let Some(hint) = wireless_status_hint(*success, msg) {
+                    ui.label(RichText::new(hint).size(11.0).weak());
+                }
             }
 
             // --- Connected devices ---
@@ -245,14 +380,71 @@ pub fn draw_wireless_dialog(ctx: &egui::Context, app: &mut App) {
 
                 if let Some(serial) = to_disconnect {
                     let result = app.rt.block_on(crate::adb::disconnect_device(&serial));
-                    match result {
-                        Ok(msg) => app.wireless_status = Some((true, msg)),
-                        Err(msg) => app.wireless_status = Some((false, msg)),
-                    }
+                    set_wireless_status(app, result);
                     app.device_refresh_pending = true;
                 }
             }
         });
+    app.show_wireless_dialog = open;
+}
+
+fn set_wireless_status(app: &mut App, result: Result<String, String>) {
+    match result {
+        Ok(msg) => app.wireless_status = Some((true, msg)),
+        Err(msg) => app.wireless_status = Some((false, msg)),
+    }
+}
+
+fn is_usb_android_device(device: &ConnectedDevice) -> bool {
+    device.supports_wireless_debugging() && !crate::adb::is_tcp_device(&device.id)
+}
+
+fn wireless_status_hint(success: bool, message: &str) -> Option<&'static str> {
+    if success {
+        let lower = message.to_lowercase();
+        if lower.contains("automatic connect") {
+            return Some(
+                "Pairing succeeded, but the wireless connect step still needs help. Try the Connect section or Refresh devices.",
+            );
+        }
+        if lower.contains("tcp/ip") {
+            return Some(
+                "If the device does not appear immediately, leave USB attached for a moment, then click Refresh devices or try Connect with the filled host:port.",
+            );
+        }
+        return None;
+    }
+
+    let lower = message.to_lowercase();
+    if lower.contains("protocol fault") {
+        return Some(
+            "This usually means stale wireless auth or a wedged pairing service. Restart ADB here, then on the device re-open Wireless debugging and re-pair.",
+        );
+    }
+    if lower.contains("unauthorized") {
+        return Some(
+            "Reconnect over USB and accept the RSA prompt again. If it keeps happening, revoke USB debugging authorizations on the phone and retry.",
+        );
+    }
+    if lower.contains("timed out") || lower.contains("mdns") {
+        return Some(
+            "Keep the phone on the QR pairing screen and make sure the Mac and phone are on the same Wi-Fi without VPN or client isolation.",
+        );
+    }
+    if lower.contains("failed to connect")
+        || lower.contains("unable to connect")
+        || lower.contains("connection refused")
+    {
+        return Some(
+            "Double-check that you are using the device's connect port, not the pairing port. If USB works, try the TCP/IP fallback below.",
+        );
+    }
+    if lower.contains("more than one device") {
+        return Some(
+            "Disconnect extra Android devices or use the USB-assisted fallback selector to target the exact device you want.",
+        );
+    }
+    None
 }
 
 pub fn draw_ios_simulator_dialog(ctx: &egui::Context, app: &mut App) {

@@ -8,14 +8,19 @@ use tokio::sync::mpsc;
 pub fn adb_binary() -> &'static str {
     static ADB_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ADB_PATH.get_or_init(|| {
-        let mut candidates: Vec<std::path::PathBuf> =
-            vec!["/opt/homebrew/bin/adb".into(), "/usr/local/bin/adb".into()];
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(android_sdk_root) = std::env::var("ANDROID_SDK_ROOT") {
+            candidates.push(format!("{android_sdk_root}/platform-tools/adb").into());
+        }
         if let Ok(android_home) = std::env::var("ANDROID_HOME") {
             candidates.push(format!("{android_home}/platform-tools/adb").into());
         }
         if let Ok(home) = std::env::var("HOME") {
+            candidates.push(format!("{home}/Library/Android/Sdk/platform-tools/adb").into());
             candidates.push(format!("{home}/Library/Android/sdk/platform-tools/adb").into());
         }
+        candidates.push("/opt/homebrew/bin/adb".into());
+        candidates.push("/usr/local/bin/adb".into());
 
         for path in &candidates {
             if path.exists() {
@@ -31,6 +36,19 @@ pub fn adb_binary() -> &'static str {
 pub struct AdbDevice {
     pub serial: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QrPairEvent {
+    Status(String),
+    Finished(Result<String, String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpipEnableResult {
+    pub message: String,
+    pub connect_host: Option<String>,
+    pub connected: bool,
 }
 
 impl std::fmt::Display for AdbDevice {
@@ -239,6 +257,88 @@ pub async fn disconnect_device(serial: &str) -> Result<String, String> {
     }
 }
 
+/// Restart the adb server.
+pub async fn restart_server() -> Result<String, String> {
+    Command::new(adb_binary())
+        .args(["kill-server"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run adb kill-server: {e}"))?;
+
+    let output = Command::new(adb_binary())
+        .args(["start-server"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run adb start-server: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        let msg = if stdout.is_empty() {
+            "ADB server restarted".to_string()
+        } else {
+            stdout
+        };
+        Ok(msg)
+    } else {
+        Err(format!("{stdout}{stderr}"))
+    }
+}
+
+/// Enable adb TCP/IP mode over USB and attempt to auto-connect to the device's Wi-Fi IP.
+pub async fn enable_tcpip_mode(device: &str, port: u16) -> Result<TcpipEnableResult, String> {
+    let output = Command::new(adb_binary())
+        .args(["-s", device, "tcpip", &port.to_string()])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run adb tcpip: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(format!("{stdout}{stderr}"));
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let ip = detect_device_ip(device).await.ok();
+    let connect_host = ip.map(|ip| format!("{ip}:{port}"));
+
+    if let Some(host) = &connect_host {
+        match connect_device(host).await {
+            Ok(_) => {
+                return Ok(TcpipEnableResult {
+                    message: format!("Enabled TCP/IP on {device} and connected to {host}."),
+                    connect_host,
+                    connected: true,
+                });
+            }
+            Err(err) => {
+                return Ok(TcpipEnableResult {
+                    message: format!(
+                        "Enabled TCP/IP on {device}, but automatic connect to {host} failed: {err}"
+                    ),
+                    connect_host,
+                    connected: false,
+                });
+            }
+        }
+    }
+
+    let prefix = if stdout.is_empty() {
+        format!("Enabled TCP/IP on {device}.")
+    } else {
+        stdout
+    };
+    Ok(TcpipEnableResult {
+        message: format!(
+            "{prefix} Connect manually using the device Wi-Fi IP and port {port}."
+        ),
+        connect_host: None,
+        connected: false,
+    })
+}
+
 /// Generate a random alphabetic string (letters only, like lyto).
 pub fn random_id(len: usize) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -308,10 +408,11 @@ pub fn generate_qr_image(data: &str, scale: usize) -> egui::ColorImage {
 /// 4. Then auto-connect using the connect port
 pub fn spawn_mdns_pairing_discovery(
     _rt: &tokio::runtime::Handle,
-    _expected_name: String,
+    expected_name: String,
     password: String,
-) -> mpsc::Receiver<Result<String, String>> {
-    let (tx, rx) = mpsc::channel::<Result<String, String>>(4);
+) -> mpsc::Receiver<QrPairEvent> {
+    let (tx, rx) = mpsc::channel::<QrPairEvent>(8);
+    let adb_path = adb_binary().to_string();
 
     std::thread::spawn(move || {
         use mdns_sd::{ServiceDaemon, ServiceEvent};
@@ -320,7 +421,9 @@ pub fn spawn_mdns_pairing_discovery(
         let mdns = match ServiceDaemon::new() {
             Ok(d) => d,
             Err(e) => {
-                let _ = tx.blocking_send(Err(format!("mDNS init failed: {e}")));
+                let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
+                    "mDNS init failed: {e}"
+                ))));
                 return;
             }
         };
@@ -331,17 +434,25 @@ pub fn spawn_mdns_pairing_discovery(
         let pair_rx = match mdns.browse(pairing_type) {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.blocking_send(Err(format!("mDNS browse (pair) failed: {e}")));
+                let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
+                    "mDNS browse (pair) failed: {e}"
+                ))));
                 return;
             }
         };
         let conn_rx = match mdns.browse(connect_type) {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.blocking_send(Err(format!("mDNS browse (connect) failed: {e}")));
+                let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
+                    "mDNS browse (connect) failed: {e}"
+                ))));
                 return;
             }
         };
+
+        let _ = tx.blocking_send(QrPairEvent::Status(
+            "Waiting for the phone to advertise the QR pairing service…".to_string(),
+        ));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut connect_ports: Vec<(String, u16)> = Vec::new(); // (addr, port)
@@ -349,7 +460,9 @@ pub fn spawn_mdns_pairing_discovery(
 
         loop {
             if std::time::Instant::now() > deadline {
-                let _ = tx.blocking_send(Err("Timed out waiting for device".to_string()));
+                let _ = tx.blocking_send(QrPairEvent::Finished(Err(
+                    "Timed out waiting for the QR pairing service".to_string(),
+                )));
                 break;
             }
 
@@ -358,8 +471,11 @@ pub fn spawn_mdns_pairing_discovery(
                 if let ServiceEvent::ServiceResolved(info) = event {
                     if let Some(addr) = info.get_addresses().iter().find(|a| a.is_ipv4()) {
                         let port = info.get_port();
+                        let addr = addr.to_string();
                         eprintln!("mDNS: found connect service at {}:{}", addr, port);
-                        connect_ports.push((addr.to_string(), port));
+                        if !connect_ports.iter().any(|entry| entry == &(addr.clone(), port)) {
+                            connect_ports.push((addr, port));
+                        }
                     }
                 }
             }
@@ -367,6 +483,10 @@ pub fn spawn_mdns_pairing_discovery(
             // Poll pairing service
             match pair_rx.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
+                    if !service_matches_expected_name(&info.get_fullname(), &expected_name) {
+                        continue;
+                    }
+
                     // Need at least one connect port before pairing (like lyto)
                     if connect_ports.is_empty() {
                         eprintln!(
@@ -387,14 +507,20 @@ pub fn spawn_mdns_pairing_discovery(
                     }
 
                     eprintln!("mDNS: attempting adb pair {}...", pair_addr);
+                    let _ = tx.blocking_send(QrPairEvent::Status(format!(
+                        "Found the QR pairing service at {pair_addr}; attempting to pair…"
+                    )));
 
-                    let output = match std::process::Command::new("adb")
+                    let output = match std::process::Command::new(&adb_path)
                         .args(["pair", &pair_addr, &password])
                         .output()
                     {
                         Ok(o) => o,
                         Err(e) => {
                             eprintln!("adb pair command error: {e}");
+                            let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
+                                "Failed to run adb pair: {e}"
+                            ))));
                             continue;
                         }
                     };
@@ -405,18 +531,56 @@ pub fn spawn_mdns_pairing_discovery(
 
                     if combined.to_lowercase().contains("success") {
                         // Pair succeeded — now auto-connect
-                        if let Some((conn_addr, conn_port)) = connect_ports.last() {
+                        if let Some((conn_addr, conn_port)) = connect_ports
+                            .iter()
+                            .rev()
+                            .find(|(conn_addr, _)| conn_addr == &addr)
+                        {
                             let connect_addr = format!("{}:{}", conn_addr, conn_port);
                             eprintln!("Paired! Auto-connecting to {}...", connect_addr);
-                            let _ = std::process::Command::new("adb")
+                            let _ = tx.blocking_send(QrPairEvent::Status(format!(
+                                "Paired successfully; connecting to {connect_addr}…"
+                            )));
+                            let connect_output = std::process::Command::new(&adb_path)
                                 .args(["connect", &connect_addr])
                                 .output();
-                            let _ = tx.blocking_send(Ok(format!(
-                                "Paired & connected to {}",
-                                connect_addr
-                            )));
+                            match connect_output {
+                                Ok(output) => {
+                                    let connect_stdout = String::from_utf8_lossy(&output.stdout);
+                                    let connect_stderr = String::from_utf8_lossy(&output.stderr);
+                                    let connect_combined =
+                                        format!("{}{}", connect_stdout, connect_stderr);
+                                    if output.status.success()
+                                        && connect_combined.to_lowercase().contains("connected")
+                                    {
+                                        let _ = tx.blocking_send(QrPairEvent::Finished(Ok(
+                                            format!("Paired & connected to {connect_addr}"),
+                                        )));
+                                    } else {
+                                        let _ = tx.blocking_send(QrPairEvent::Finished(Ok(
+                                            format!(
+                                                "Paired with {pair_addr}. Automatic connect to \
+                                                 {connect_addr} failed: {}. Use the Connect \
+                                                 section with the device's connect port if needed.",
+                                                connect_combined.trim()
+                                            ),
+                                        )));
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.blocking_send(QrPairEvent::Finished(Ok(format!(
+                                        "Paired with {pair_addr}. Automatic connect to \
+                                         {connect_addr} failed: {e}. Use the Connect section if \
+                                         needed."
+                                    ))));
+                                }
+                            }
                         } else {
-                            let _ = tx.blocking_send(Ok(format!("Paired with {pair_addr}")));
+                            let _ = tx.blocking_send(QrPairEvent::Finished(Ok(format!(
+                                "Paired with {pair_addr}. If the device does not appear \
+                                 automatically, use the Connect section with the device's \
+                                 connect port."
+                            ))));
                         }
                         break;
                     } else {
@@ -425,7 +589,8 @@ pub fn spawn_mdns_pairing_discovery(
                             pair_addr,
                             combined.trim()
                         );
-                        continue;
+                        let _ = tx.blocking_send(QrPairEvent::Finished(Err(combined.trim().to_string())));
+                        break;
                     }
                 }
                 Ok(_) => continue,
@@ -459,5 +624,63 @@ pub fn local_ip_prefix() -> String {
             }
         }
         Err(_) => String::new(),
+    }
+}
+
+fn service_matches_expected_name(fullname: &str, expected_name: &str) -> bool {
+    fullname.contains(expected_name)
+}
+
+async fn detect_device_ip(device: &str) -> Result<String, String> {
+    let output = Command::new(adb_binary())
+        .args(["-s", device, "shell", "ip", "route"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to query device IP: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    extract_ip_from_route_output(&stdout).ok_or_else(|| {
+        "Could not determine the device Wi-Fi IP from `adb shell ip route`".to_string()
+    })
+}
+
+fn extract_ip_from_route_output(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "src" {
+                let ip = parts.next()?;
+                if ip.parse::<std::net::IpAddr>().is_ok() {
+                    return Some(ip.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_ip_from_route_output, service_matches_expected_name};
+
+    #[test]
+    fn extracts_ip_from_route_output() {
+        let output = "192.168.0.0/24 dev wlan0 proto kernel scope link src 192.168.0.15";
+        assert_eq!(
+            extract_ip_from_route_output(output).as_deref(),
+            Some("192.168.0.15")
+        );
+    }
+
+    #[test]
+    fn matches_expected_mdns_service_name() {
+        assert!(service_matches_expected_name(
+            "ADB_WIFI_abcde._adb-tls-pairing._tcp.local.",
+            "ADB_WIFI_abcde"
+        ));
+        assert!(!service_matches_expected_name(
+            "Pixel_8._adb-tls-pairing._tcp.local.",
+            "ADB_WIFI_abcde"
+        ));
     }
 }

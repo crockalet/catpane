@@ -9,10 +9,8 @@ use egui;
 const TAG_HISTORY_MAX: usize = 50;
 
 pub struct QrPairingState {
-    pub password: String,
-    pub service_name: String,
     pub qr_texture: Option<egui::TextureHandle>,
-    pub mdns_rx: tokio::sync::mpsc::Receiver<Result<String, String>>,
+    pub mdns_rx: tokio::sync::mpsc::Receiver<crate::adb::QrPairEvent>,
     pub status: QrPairStatus,
 }
 
@@ -76,6 +74,7 @@ pub struct App {
     pub wireless_pair_code: String,
     pub wireless_connect_host: String,
     pub wireless_status: Option<(bool, String)>,
+    pub wireless_usb_device: Option<String>,
     // QR pairing state
     pub qr_pairing: Option<QrPairingState>,
     pub show_ios_simulator_dialog: bool,
@@ -118,6 +117,7 @@ impl App {
             wireless_pair_code: String::new(),
             wireless_connect_host: crate::adb::local_ip_prefix(),
             wireless_status: None,
+            wireless_usb_device: None,
             qr_pairing: None,
             show_ios_simulator_dialog: false,
             ios_simulators: Vec::new(),
@@ -383,6 +383,7 @@ impl App {
             wireless_pair_code: String::new(),
             wireless_connect_host: crate::adb::local_ip_prefix(),
             wireless_status: None,
+            wireless_usb_device: None,
             qr_pairing: None,
             show_ios_simulator_dialog: false,
             ios_simulators: Vec::new(),
