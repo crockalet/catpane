@@ -421,7 +421,10 @@ mod tests {
 
         assert_eq!(pane.entries.len(), capacity);
         assert_eq!(pane.filtered_indices.len(), capacity);
-        assert_eq!(pane.entries.first().map(|entry| entry.message.as_str()), Some("message-3"));
+        assert_eq!(
+            pane.entries.first().map(|entry| entry.message.as_str()),
+            Some("message-3")
+        );
         assert_eq!(
             pane.entries.last().map(|entry| entry.message.as_str()),
             Some(format!("message-{}", total - 1).as_str())

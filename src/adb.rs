@@ -1,6 +1,7 @@
-use std::net::UdpSocket;
-use tokio::process::Command;
+use std::{net::UdpSocket, process::Output, time::Duration};
 use tokio::sync::mpsc;
+
+use crate::command::OneShotCommand;
 
 /// Resolves the `adb` binary path, probing common macOS installation locations
 /// so that GUI apps (Homebrew Cask, double-click launch) find adb even when
@@ -110,17 +111,32 @@ fn deduplicate_devices(devices: Vec<AdbDevice>) -> Vec<AdbDevice> {
     result
 }
 
-pub async fn list_devices() -> Vec<AdbDevice> {
-    let output = match Command::new(adb_binary())
-        .args(["devices", "-l"])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
+const ADB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_DEVICE_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const ADB_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
-    let raw: Vec<AdbDevice> = String::from_utf8_lossy(&output.stdout)
+fn adb_command<I, S>(args: I, context: &'static str, timeout: Duration) -> OneShotCommand
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    OneShotCommand::new(adb_binary(), args, context, timeout)
+}
+
+fn combine_command_output(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (true, true) => String::new(),
+    }
+}
+
+fn parse_adb_devices_output(stdout: &[u8]) -> Vec<AdbDevice> {
+    let raw: Vec<AdbDevice> = String::from_utf8_lossy(stdout)
         .lines()
         .skip(1)
         .filter_map(|line| {
@@ -128,8 +144,6 @@ pub async fn list_devices() -> Vec<AdbDevice> {
             if line.is_empty() {
                 return None;
             }
-            // Find " device " as the status separator (with spaces to avoid matching "device:" in descriptions)
-            // Line format: <serial> [mDNS info] device <description key:value pairs>
             let idx = line.find(" device ")?;
             let serial = line[..idx].trim().to_string();
             let description = line[idx + 8..].trim().to_string();
@@ -143,58 +157,35 @@ pub async fn list_devices() -> Vec<AdbDevice> {
     deduplicate_devices(raw)
 }
 
-pub async fn list_packages(device: &str) -> Vec<String> {
-    // Try running processes first
-    if let Ok(output) = Command::new(adb_binary())
-        .args(["-s", device, "shell", "ps", "-A", "-o", "NAME"])
-        .output()
-        .await
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut packages: Vec<String> = stdout
-            .lines()
-            .skip(1)
-            .filter_map(|line| {
-                let name = line.trim();
-                if name.contains('.') && !name.starts_with('[') {
-                    Some(name.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        packages.sort();
-        packages.dedup();
-        if !packages.is_empty() {
-            return packages;
-        }
-    }
+fn parse_running_packages_output(stdout: &[u8]) -> Vec<String> {
+    let mut packages: Vec<String> = String::from_utf8_lossy(stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let name = line.trim();
+            if name.contains('.') && !name.starts_with('[') {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    packages.sort();
+    packages.dedup();
+    packages
+}
 
-    // Fallback: all installed packages
-    let output = match Command::new(adb_binary())
-        .args(["-s", device, "shell", "pm", "list", "packages"])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut pkgs: Vec<String> = String::from_utf8_lossy(&output.stdout)
+fn parse_installed_packages_output(stdout: &[u8]) -> Vec<String> {
+    let mut packages: Vec<String> = String::from_utf8_lossy(stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("package:").map(|p| p.trim().to_string()))
         .collect();
-    pkgs.sort();
-    pkgs
+    packages.sort();
+    packages
 }
 
-pub async fn get_pid_for_package(device: &str, package: &str) -> Option<u32> {
-    let output = Command::new(adb_binary())
-        .args(["-s", device, "shell", "pidof", package])
-        .output()
-        .await
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
+fn parse_pidof_output(stdout: &[u8]) -> Option<u32> {
+    String::from_utf8_lossy(stdout)
         .trim()
         .split_whitespace()
         .next()?
@@ -202,102 +193,225 @@ pub async fn get_pid_for_package(device: &str, package: &str) -> Option<u32> {
         .ok()
 }
 
+pub async fn list_devices_strict() -> Result<Vec<AdbDevice>, String> {
+    let command = adb_command(
+        ["devices", "-l"],
+        "listing connected Android devices",
+        ADB_DISCOVERY_TIMEOUT,
+    );
+    let output = command.ensure_success(command.run().await?)?;
+    Ok(parse_adb_devices_output(&output.stdout))
+}
+
+pub async fn list_devices() -> Vec<AdbDevice> {
+    list_devices_strict().await.unwrap_or_default()
+}
+
+pub async fn list_packages_strict(device: &str) -> Result<Vec<String>, String> {
+    let ps_command = adb_command(
+        ["-s", device, "shell", "ps", "-A", "-o", "NAME"],
+        "listing running Android packages",
+        ADB_DEVICE_QUERY_TIMEOUT,
+    );
+    let ps_error = match ps_command.run().await {
+        Ok(output) => match ps_command.ensure_success(output) {
+            Ok(output) => {
+                let packages = parse_running_packages_output(&output.stdout);
+                if !packages.is_empty() {
+                    return Ok(packages);
+                }
+                None
+            }
+            Err(err) => Some(err),
+        },
+        Err(err) => Some(err),
+    };
+
+    let pm_command = adb_command(
+        ["-s", device, "shell", "pm", "list", "packages"],
+        "listing installed Android packages",
+        ADB_DEVICE_QUERY_TIMEOUT,
+    );
+    let output = match pm_command.run().await {
+        Ok(output) => match pm_command.ensure_success(output) {
+            Ok(output) => output,
+            Err(err) => {
+                return Err(match ps_error {
+                    Some(ps_error) => {
+                        format!("{err}; running-process lookup failed earlier with: {ps_error}")
+                    }
+                    None => err,
+                });
+            }
+        },
+        Err(err) => {
+            return Err(match ps_error {
+                Some(ps_error) => {
+                    format!("{err}; fallback from running-process lookup failed after: {ps_error}")
+                }
+                None => err,
+            });
+        }
+    };
+    let packages = parse_installed_packages_output(&output.stdout);
+
+    if packages.is_empty() {
+        if let Some(ps_error) = ps_error {
+            return Err(format!(
+                "No Android packages were found for `{device}`; running-process lookup failed after: {ps_error}"
+            ));
+        }
+    }
+
+    Ok(packages)
+}
+
+pub async fn list_packages(device: &str) -> Vec<String> {
+    list_packages_strict(device).await.unwrap_or_default()
+}
+
+pub async fn get_pid_for_package_strict(
+    device: &str,
+    package: &str,
+) -> Result<Option<u32>, String> {
+    let command = adb_command(
+        ["-s", device, "shell", "pidof", package],
+        "resolving an Android package PID",
+        ADB_DEVICE_QUERY_TIMEOUT,
+    );
+    let output = command.run().await?;
+
+    if output.status.success() {
+        return Ok(parse_pidof_output(&output.stdout));
+    }
+
+    if combine_command_output(&output).is_empty() {
+        return Ok(None);
+    }
+
+    Err(command.status_error(&output))
+}
+
+pub async fn get_pid_for_package(device: &str, package: &str) -> Option<u32> {
+    get_pid_for_package_strict(device, package)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Pair with a device using `adb pair host:port code`.
 pub async fn pair_device(host_port: &str, code: &str) -> Result<String, String> {
-    let output = Command::new(adb_binary())
-        .args(["pair", host_port, code])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb pair: {e}"))?;
+    let command = adb_command(
+        ["pair", host_port, code],
+        "pairing an Android device over Wi-Fi",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    let output = command.run().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let combined = combine_command_output(&output);
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}{}", stdout, stderr).to_lowercase();
-
-    if combined.contains("success") {
-        Ok(stdout.trim().to_string())
+    if combined.to_lowercase().contains("success") {
+        Ok(stdout)
+    } else if output.status.success() {
+        Err(if combined.is_empty() {
+            format!(
+                "`{}` completed while pairing an Android device over Wi-Fi but did not report success",
+                command.display()
+            )
+        } else {
+            format!(
+                "`{}` completed while pairing an Android device over Wi-Fi but did not report success: {}",
+                command.display(),
+                combined
+            )
+        })
     } else {
-        Err(format!("{}{}", stdout.trim(), stderr.trim()))
+        Err(command.status_error(&output))
     }
 }
 
 /// Connect to a device using `adb connect host:port`.
 pub async fn connect_device(host_port: &str) -> Result<String, String> {
-    let output = Command::new(adb_binary())
-        .args(["connect", host_port])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb connect: {e}"))?;
+    let command = adb_command(
+        ["connect", host_port],
+        "connecting to an Android device over Wi-Fi",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    let output = command.run().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let combined = combine_command_output(&output);
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() && stdout.to_lowercase().contains("connected") {
-        Ok(stdout.trim().to_string())
+    if output.status.success() && combined.to_lowercase().contains("connected") {
+        Ok(stdout)
+    } else if output.status.success() {
+        Err(if combined.is_empty() {
+            format!(
+                "`{}` completed while connecting to an Android device over Wi-Fi but did not report a connection",
+                command.display()
+            )
+        } else {
+            format!(
+                "`{}` completed while connecting to an Android device over Wi-Fi but did not report a connection: {}",
+                command.display(),
+                combined
+            )
+        })
     } else {
-        Err(format!("{}{}", stdout.trim(), stderr.trim()))
+        Err(command.status_error(&output))
     }
 }
 
 /// Disconnect a wireless device using `adb disconnect host:port`.
 pub async fn disconnect_device(serial: &str) -> Result<String, String> {
-    let output = Command::new(adb_binary())
-        .args(["disconnect", serial])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb disconnect: {e}"))?;
+    let command = adb_command(
+        ["disconnect", serial],
+        "disconnecting from an Android Wi-Fi device",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    let output = command.run().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if stdout.to_lowercase().contains("disconnected") || output.status.success() {
-        Ok(stdout.trim().to_string())
+    if output.status.success() || stdout.to_lowercase().contains("disconnected") {
+        Ok(stdout)
     } else {
-        Err(format!("{}{}", stdout.trim(), stderr.trim()))
+        Err(command.status_error(&output))
     }
 }
 
 /// Restart the adb server.
 pub async fn restart_server() -> Result<String, String> {
-    Command::new(adb_binary())
-        .args(["kill-server"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb kill-server: {e}"))?;
+    let kill_command = adb_command(
+        ["kill-server"],
+        "stopping the adb server",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    kill_command.ensure_success(kill_command.run().await?)?;
 
-    let output = Command::new(adb_binary())
-        .args(["start-server"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb start-server: {e}"))?;
-
+    let start_command = adb_command(
+        ["start-server"],
+        "starting the adb server",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    let output = start_command.ensure_success(start_command.run().await?)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
-        let msg = if stdout.is_empty() {
-            "ADB server restarted".to_string()
-        } else {
-            stdout
-        };
-        Ok(msg)
+
+    if stdout.is_empty() {
+        Ok("ADB server restarted".to_string())
     } else {
-        Err(format!("{stdout}{stderr}"))
+        Ok(stdout)
     }
 }
 
 /// Enable adb TCP/IP mode over USB and attempt to auto-connect to the device's Wi-Fi IP.
 pub async fn enable_tcpip_mode(device: &str, port: u16) -> Result<TcpipEnableResult, String> {
-    let output = Command::new(adb_binary())
-        .args(["-s", device, "tcpip", &port.to_string()])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run adb tcpip: {e}"))?;
-
+    let port_string = port.to_string();
+    let command = adb_command(
+        ["-s", device, "tcpip", &port_string],
+        "enabling adb TCP/IP mode",
+        ADB_CONNECTION_TIMEOUT,
+    );
+    let output = command.ensure_success(command.run().await?)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        return Err(format!("{stdout}{stderr}"));
-    }
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -331,9 +445,7 @@ pub async fn enable_tcpip_mode(device: &str, port: u16) -> Result<TcpipEnableRes
         stdout
     };
     Ok(TcpipEnableResult {
-        message: format!(
-            "{prefix} Connect manually using the device Wi-Fi IP and port {port}."
-        ),
+        message: format!("{prefix} Connect manually using the device Wi-Fi IP and port {port}."),
         connect_host: None,
         connected: false,
     })
@@ -421,9 +533,8 @@ pub fn spawn_mdns_pairing_discovery(
         let mdns = match ServiceDaemon::new() {
             Ok(d) => d,
             Err(e) => {
-                let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
-                    "mDNS init failed: {e}"
-                ))));
+                let _ =
+                    tx.blocking_send(QrPairEvent::Finished(Err(format!("mDNS init failed: {e}"))));
                 return;
             }
         };
@@ -473,7 +584,10 @@ pub fn spawn_mdns_pairing_discovery(
                         let port = info.get_port();
                         let addr = addr.to_string();
                         eprintln!("mDNS: found connect service at {}:{}", addr, port);
-                        if !connect_ports.iter().any(|entry| entry == &(addr.clone(), port)) {
+                        if !connect_ports
+                            .iter()
+                            .any(|entry| entry == &(addr.clone(), port))
+                        {
                             connect_ports.push((addr, port));
                         }
                     }
@@ -511,16 +625,17 @@ pub fn spawn_mdns_pairing_discovery(
                         "Found the QR pairing service at {pair_addr}; attempting to pair…"
                     )));
 
-                    let output = match std::process::Command::new(&adb_path)
-                        .args(["pair", &pair_addr, &password])
-                        .output()
-                    {
-                        Ok(o) => o,
-                        Err(e) => {
-                            eprintln!("adb pair command error: {e}");
-                            let _ = tx.blocking_send(QrPairEvent::Finished(Err(format!(
-                                "Failed to run adb pair: {e}"
-                            ))));
+                    let pair_command = OneShotCommand::new(
+                        adb_path.clone(),
+                        vec!["pair".to_string(), pair_addr.clone(), password.clone()],
+                        "pairing an Android device over Wi-Fi",
+                        ADB_CONNECTION_TIMEOUT,
+                    );
+                    let output = match pair_command.run_blocking() {
+                        Ok(output) => output,
+                        Err(err) => {
+                            eprintln!("adb pair command error: {err}");
+                            let _ = tx.blocking_send(QrPairEvent::Finished(Err(err)));
                             continue;
                         }
                     };
@@ -541,10 +656,13 @@ pub fn spawn_mdns_pairing_discovery(
                             let _ = tx.blocking_send(QrPairEvent::Status(format!(
                                 "Paired successfully; connecting to {connect_addr}…"
                             )));
-                            let connect_output = std::process::Command::new(&adb_path)
-                                .args(["connect", &connect_addr])
-                                .output();
-                            match connect_output {
+                            let connect_command = OneShotCommand::new(
+                                adb_path.clone(),
+                                vec!["connect".to_string(), connect_addr.clone()],
+                                "connecting to an Android device over Wi-Fi",
+                                ADB_CONNECTION_TIMEOUT,
+                            );
+                            match connect_command.run_blocking() {
                                 Ok(output) => {
                                     let connect_stdout = String::from_utf8_lossy(&output.stdout);
                                     let connect_stderr = String::from_utf8_lossy(&output.stderr);
@@ -557,14 +675,18 @@ pub fn spawn_mdns_pairing_discovery(
                                             format!("Paired & connected to {connect_addr}"),
                                         )));
                                     } else {
-                                        let _ = tx.blocking_send(QrPairEvent::Finished(Ok(
-                                            format!(
+                                        let connect_error = if output.status.success() {
+                                            connect_combined.trim().to_string()
+                                        } else {
+                                            connect_command.status_error(&output)
+                                        };
+                                        let _ =
+                                            tx.blocking_send(QrPairEvent::Finished(Ok(format!(
                                                 "Paired with {pair_addr}. Automatic connect to \
                                                  {connect_addr} failed: {}. Use the Connect \
                                                  section with the device's connect port if needed.",
-                                                connect_combined.trim()
-                                            ),
-                                        )));
+                                                connect_error
+                                            ))));
                                     }
                                 }
                                 Err(e) => {
@@ -584,12 +706,13 @@ pub fn spawn_mdns_pairing_discovery(
                         }
                         break;
                     } else {
-                        eprintln!(
-                            "Pair attempt with {} failed: {}",
-                            pair_addr,
-                            combined.trim()
-                        );
-                        let _ = tx.blocking_send(QrPairEvent::Finished(Err(combined.trim().to_string())));
+                        let pair_error = if output.status.success() {
+                            combined.trim().to_string()
+                        } else {
+                            pair_command.status_error(&output)
+                        };
+                        eprintln!("Pair attempt with {} failed: {}", pair_addr, pair_error);
+                        let _ = tx.blocking_send(QrPairEvent::Finished(Err(pair_error)));
                         break;
                     }
                 }
@@ -632,11 +755,12 @@ fn service_matches_expected_name(fullname: &str, expected_name: &str) -> bool {
 }
 
 async fn detect_device_ip(device: &str) -> Result<String, String> {
-    let output = Command::new(adb_binary())
-        .args(["-s", device, "shell", "ip", "route"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to query device IP: {e}"))?;
+    let command = adb_command(
+        ["-s", device, "shell", "ip", "route"],
+        "querying an Android device Wi-Fi IP",
+        ADB_DEVICE_QUERY_TIMEOUT,
+    );
+    let output = command.ensure_success(command.run().await?)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     extract_ip_from_route_output(&stdout).ok_or_else(|| {
@@ -661,7 +785,38 @@ fn extract_ip_from_route_output(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_ip_from_route_output, service_matches_expected_name};
+    use super::{
+        extract_ip_from_route_output, parse_adb_devices_output, parse_pidof_output,
+        parse_running_packages_output, service_matches_expected_name,
+    };
+
+    #[test]
+    fn parses_and_deduplicates_adb_devices() {
+        let devices = parse_adb_devices_output(
+            br#"List of devices attached
+usb-serial device product:oriole model:Pixel_6 device:oriole transport_id:1
+adb-123._adb-tls-connect._tcp device product:oriole model:Pixel_6 device:oriole transport_id:2
+192.168.1.25:5555 device product:oriole model:Pixel_6 device:oriole transport_id:3
+"#,
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].serial, "192.168.1.25:5555");
+    }
+
+    #[test]
+    fn parses_running_package_names() {
+        let packages = parse_running_packages_output(
+            b"NAME\n/system/bin/sh\ncom.example.one\n[com.android.shell]\ncom.example.two\n",
+        );
+
+        assert_eq!(packages, vec!["com.example.one", "com.example.two"]);
+    }
+
+    #[test]
+    fn parses_first_pid_from_pidof_output() {
+        assert_eq!(parse_pidof_output(b"1234 5678\n"), Some(1234));
+    }
 
     #[test]
     fn extracts_ip_from_route_output() {

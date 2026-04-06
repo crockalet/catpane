@@ -3,12 +3,12 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
     capture::{self, ConnectedDevice, DevicePlatform},
@@ -32,6 +32,10 @@ pub const TOOL_GET_STATUS: &str = "get_status";
 
 pub const DEFAULT_GET_LOGS_LIMIT: usize = 100;
 pub const MAX_GET_LOGS_LIMIT: usize = 1_000;
+
+const CAPTURE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_CAPTURE_REASON: &str = "stopped by stop_capture";
+const RESTART_CAPTURE_REASON: &str = "stopped for restart";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -529,8 +533,9 @@ impl McpRuntimeState {
         &self,
         _args: ListDevicesArgs,
     ) -> Result<ListDevicesResponse, McpToolError> {
-        let devices = capture::list_devices()
+        let devices = capture::list_devices_strict()
             .await
+            .map_err(McpToolError::internal)?
             .into_iter()
             .map(DeviceInfo::from)
             .collect::<Vec<_>>();
@@ -555,32 +560,18 @@ impl McpRuntimeState {
             ));
         }
 
+        let restart_plan = {
+            let mut inner = lock_recover(&self.inner);
+            inner.prepare_start(&device, args.restart)?
+        };
+
+        if let Some(shutdown) = restart_plan.shutdown.as_ref() {
+            shutdown.wait_for_restart().await?;
+        }
+
         let (capture, restarted) = {
             let mut inner = lock_recover(&self.inner);
-
-            let replaced = if let Some(existing_id) =
-                find_capture_id_by_device(&inner.captures, &device.id)
-            {
-                let existing_is_running = inner
-                    .captures
-                    .get(&existing_id)
-                    .map(CaptureRuntime::is_running)
-                    .unwrap_or(false);
-
-                if existing_is_running && !args.restart {
-                    return Err(McpToolError::conflict(format!(
-                        "a capture is already running for device {device}; stop it first or pass restart=true"
-                    )));
-                }
-
-                let removed = inner.captures.remove(&existing_id);
-                if let Some(existing) = removed.as_ref() {
-                    existing.abort();
-                }
-                removed.is_some()
-            } else {
-                false
-            };
+            inner.finalize_replaced_capture(&device, &restart_plan)?;
 
             let capture_id = format!("capture-{}", inner.next_capture_id);
             inner.next_capture_id = inner.next_capture_id.saturating_add(1);
@@ -594,9 +585,12 @@ impl McpRuntimeState {
                 capacity,
             ));
             let mut stream = capture::spawn_capture(rt, &device, pid_filter);
+            let capture_control = stream.controller();
+            let (pump_done_tx, pump_done) = watch::channel(false);
             let shared_for_task = Arc::clone(&shared);
 
             let pump_task = rt.spawn(async move {
+                let _pump_done = CompletionSignal::new(pump_done_tx);
                 while let Some(entry) = stream.rx.recv().await {
                     shared_for_task.append_entry(entry);
                 }
@@ -606,26 +600,41 @@ impl McpRuntimeState {
             let capture = CaptureRuntime {
                 capture_id: capture_id.clone(),
                 shared,
+                capture_control,
+                pump_done,
                 pump_task,
+                shutdown_requested: false,
             };
             let snapshot = capture.snapshot();
             inner.captures.insert(capture_id, capture);
-            (snapshot, replaced)
+            (snapshot, restart_plan.replaced_capture_id.is_some())
         };
 
         Ok(StartCaptureResponse { restarted, capture })
     }
 
-    pub fn stop_capture(&self, args: StopCaptureArgs) -> Result<StopCaptureResponse, McpToolError> {
+    pub async fn stop_capture(
+        &self,
+        args: StopCaptureArgs,
+    ) -> Result<StopCaptureResponse, McpToolError> {
         let selector = args.selector();
+        let shutdown = {
+            let mut inner = lock_recover(&self.inner);
+            inner.prepare_stop(&selector)?
+        };
+        shutdown.wait_for_stop().await?;
+
         let capture = {
             let mut inner = lock_recover(&self.inner);
-            let capture_id = resolve_capture_id(&inner.captures, &selector)?;
-            inner.captures.remove(&capture_id).ok_or_else(|| {
-                McpToolError::not_found(format!("capture {capture_id} was not found"))
-            })?
+            inner.finalize_capture_shutdown(&shutdown.capture_id)
+                .ok_or_else(|| {
+                    McpToolError::internal(format!(
+                        "capture `{}` finished stopping but could not be removed from runtime state",
+                        shutdown.capture_id
+                    ))
+                })?
         };
-        Ok(capture.into_stopped_response("stopped by stop_capture"))
+        Ok(capture.into_stopped_response(STOP_CAPTURE_REASON))
     }
 
     pub fn clear_logs(&self, args: ClearLogsArgs) -> Result<ClearLogsResponse, McpToolError> {
@@ -718,7 +727,7 @@ impl McpRuntimeState {
             }
             TOOL_STOP_CAPTURE => {
                 let args = parse_arguments::<StopCaptureArgs>(&params)?;
-                json_success(&self.stop_capture(args)?)
+                json_success(&self.stop_capture(args).await?)
             }
             TOOL_GET_STATUS => {
                 let args = parse_arguments::<GetStatusArgs>(&params)?;
@@ -754,15 +763,160 @@ impl Default for RuntimeInner {
     }
 }
 
+impl RuntimeInner {
+    fn prepare_start(
+        &mut self,
+        device: &ConnectedDevice,
+        restart: bool,
+    ) -> Result<CaptureStartPlan, McpToolError> {
+        let Some(existing_capture_id) = find_capture_id_by_device(&self.captures, &device.id)
+        else {
+            return Ok(CaptureStartPlan::default());
+        };
+
+        let existing = self.captures.get_mut(&existing_capture_id).ok_or_else(|| {
+            McpToolError::internal(format!(
+                "capture `{existing_capture_id}` disappeared during start preparation"
+            ))
+        })?;
+
+        if existing.is_running() && !restart {
+            return Err(McpToolError::conflict(format!(
+                "a capture is already running for device {device}; stop it first or pass restart=true"
+            )));
+        }
+
+        let shutdown = existing
+            .is_running()
+            .then(|| existing.request_shutdown(RESTART_CAPTURE_REASON));
+
+        Ok(CaptureStartPlan {
+            replaced_capture_id: Some(existing_capture_id),
+            shutdown,
+        })
+    }
+
+    fn finalize_replaced_capture(
+        &mut self,
+        device: &ConnectedDevice,
+        plan: &CaptureStartPlan,
+    ) -> Result<(), McpToolError> {
+        if let Some(replaced_capture_id) = plan.replaced_capture_id.as_deref() {
+            if let Some(active_capture_id) = find_capture_id_by_device(&self.captures, &device.id) {
+                if active_capture_id != replaced_capture_id {
+                    return Err(McpToolError::conflict(format!(
+                        "another capture became active for device {device} while restart cleanup was in progress"
+                    )));
+                }
+            }
+            self.captures.remove(replaced_capture_id);
+        } else if let Some(active_capture_id) =
+            find_capture_id_by_device(&self.captures, &device.id)
+        {
+            return Err(McpToolError::conflict(format!(
+                "a capture is already registered for device {device} ({active_capture_id})"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn prepare_stop(
+        &mut self,
+        selector: &CaptureSelector,
+    ) -> Result<CaptureShutdownWait, McpToolError> {
+        let capture_id = resolve_capture_id(&self.captures, selector)?;
+        let capture = self.captures.get_mut(&capture_id).ok_or_else(|| {
+            McpToolError::not_found(format!("capture `{capture_id}` was not found"))
+        })?;
+        Ok(capture.request_shutdown(STOP_CAPTURE_REASON))
+    }
+
+    fn finalize_capture_shutdown(&mut self, capture_id: &str) -> Option<CaptureRuntime> {
+        self.captures.remove(capture_id)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CaptureStartPlan {
+    replaced_capture_id: Option<String>,
+    shutdown: Option<CaptureShutdownWait>,
+}
+
+#[derive(Debug, Clone)]
+struct CaptureShutdownWait {
+    capture_id: String,
+    device: String,
+    capture_shutdown: capture::CaptureController,
+    pump_done: watch::Receiver<bool>,
+}
+
+impl CaptureShutdownWait {
+    async fn wait_for_restart(&self) -> Result<(), McpToolError> {
+        self.wait_with_timeout(
+            CAPTURE_SHUTDOWN_TIMEOUT,
+            format!(
+                "waiting for existing capture `{}` on device `{}` to stop before restart",
+                self.capture_id, self.device
+            ),
+        )
+        .await
+    }
+
+    async fn wait_for_stop(&self) -> Result<(), McpToolError> {
+        self.wait_with_timeout(
+            CAPTURE_SHUTDOWN_TIMEOUT,
+            format!(
+                "waiting for capture `{}` on device `{}` to stop",
+                self.capture_id, self.device
+            ),
+        )
+        .await
+    }
+
+    async fn wait_with_timeout(
+        &self,
+        timeout: Duration,
+        context: String,
+    ) -> Result<(), McpToolError> {
+        tokio::time::timeout(timeout, async {
+            self.capture_shutdown.wait_for_shutdown().await;
+            wait_for_completion(self.pump_done.clone()).await;
+        })
+        .await
+        .map_err(|_| {
+            McpToolError::conflict(format!(
+                "timed out after {} while {context}",
+                format_duration(timeout)
+            ))
+        })?;
+        Ok(())
+    }
+}
+
 struct CaptureRuntime {
     capture_id: String,
     shared: Arc<CaptureShared>,
+    capture_control: capture::CaptureController,
+    pump_done: watch::Receiver<bool>,
     pump_task: JoinHandle<()>,
+    shutdown_requested: bool,
 }
 
 impl CaptureRuntime {
-    fn abort(&self) {
-        self.pump_task.abort();
+    fn request_shutdown(&mut self, reason: &str) -> CaptureShutdownWait {
+        self.shared.mark_stop_requested(reason);
+        if !self.shutdown_requested {
+            self.capture_control.stop();
+            self.shutdown_requested = true;
+        }
+
+        CaptureShutdownWait {
+            capture_id: self.capture_id.clone(),
+            device: self.shared.device.clone(),
+            capture_shutdown: self.capture_control.clone(),
+            pump_done: self.pump_done.clone(),
+        }
     }
 
     fn device(&self) -> &str {
@@ -799,13 +953,10 @@ impl CaptureRuntime {
     }
 
     fn into_stopped_response(self, reason: &str) -> StopCaptureResponse {
+        self.shared.finish(reason);
         let mut capture = self.snapshot();
         capture.running = false;
-        if capture.finished_at_ms.is_none() {
-            capture.finished_at_ms = Some(now_epoch_ms());
-        }
         capture.stop_reason = Some(reason.to_owned());
-        self.abort();
 
         StopCaptureResponse {
             stopped: true,
@@ -875,6 +1026,13 @@ impl CaptureShared {
     fn query(&self, query: &LogQuery) -> LogPage {
         let buffer = lock_recover(&self.buffer);
         buffer.query(query)
+    }
+
+    fn mark_stop_requested(&self, reason: &str) {
+        let mut stats = lock_recover(&self.stats);
+        if stats.stop_reason.is_none() {
+            stats.stop_reason = Some(reason.to_owned());
+        }
     }
 
     fn finish(&self, reason: &str) {
@@ -1170,7 +1328,9 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 
 async fn resolve_connected_device(device: Option<String>) -> Result<ConnectedDevice, McpToolError> {
     let device = normalize_optional_string(device);
-    let devices = capture::list_devices().await;
+    let devices = capture::list_devices_strict()
+        .await
+        .map_err(McpToolError::internal)?;
 
     if let Some(device) = device {
         if let Some(connected) = devices.iter().find(|connected| connected.id == device) {
@@ -1233,15 +1393,16 @@ async fn resolve_pid_filter(
         return Ok(None);
     };
 
-    capture::get_pid_for_package(&device.id, package, std::slice::from_ref(device))
+    match capture::get_pid_for_package_strict(&device.id, package, std::slice::from_ref(device))
         .await
-        .map(Some)
-        .ok_or_else(|| {
-            McpToolError::not_found(format!(
-                "could not resolve a PID for package `{package}` on device `{}`",
-                device.id
-            ))
-        })
+        .map_err(McpToolError::internal)?
+    {
+        Some(pid) => Ok(Some(pid)),
+        None => Err(McpToolError::not_found(format!(
+            "could not resolve a PID for package `{package}` on device `{}`",
+            device.id
+        ))),
+    }
 }
 
 fn joined_device_serials(devices: &[ConnectedDevice]) -> String {
@@ -1320,9 +1481,182 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+struct CompletionSignal {
+    tx: Option<watch::Sender<bool>>,
+}
+
+impl CompletionSignal {
+    fn new(tx: watch::Sender<bool>) -> Self {
+        Self { tx: Some(tx) }
+    }
+}
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(true);
+        }
+    }
+}
+
+async fn wait_for_completion(mut completion_rx: watch::Receiver<bool>) {
+    if *completion_rx.borrow() {
+        return;
+    }
+
+    while completion_rx.changed().await.is_ok() {
+        if *completion_rx.borrow() {
+            return;
+        }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{:.1}s", duration.as_secs_f64())
+    }
+}
+
 fn now_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected_device(id: &str) -> ConnectedDevice {
+        ConnectedDevice {
+            id: id.to_owned(),
+            name: format!("Device {id}"),
+            description: "Test device".to_owned(),
+            platform: DevicePlatform::Android,
+        }
+    }
+
+    fn capture_runtime(capture_id: &str, device: &ConnectedDevice) -> CaptureRuntime {
+        let (capture_control, _kill_rx, _completion_tx) =
+            capture::CaptureController::test_controller();
+        capture_runtime_with_control(capture_id, device, capture_control)
+    }
+
+    fn capture_runtime_with_control(
+        capture_id: &str,
+        device: &ConnectedDevice,
+        capture_control: capture::CaptureController,
+    ) -> CaptureRuntime {
+        let (pump_done_tx, pump_done) = watch::channel(false);
+        let pump_control = capture_control.clone();
+        let pump_task = tokio::spawn(async move {
+            let _pump_done = CompletionSignal::new(pump_done_tx);
+            pump_control.wait_for_shutdown().await;
+        });
+
+        CaptureRuntime {
+            capture_id: capture_id.to_owned(),
+            shared: Arc::new(CaptureShared::new(
+                device.id.clone(),
+                device.name.clone(),
+                device.platform,
+                None,
+                None,
+                32,
+            )),
+            capture_control,
+            pump_done,
+            pump_task,
+            shutdown_requested: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_start_requires_restart_for_running_capture() {
+        let device = connected_device("device-1");
+        let mut inner = RuntimeInner::default();
+        inner.captures.insert(
+            "capture-1".to_owned(),
+            capture_runtime("capture-1", &device),
+        );
+
+        let err = inner.prepare_start(&device, false).unwrap_err();
+        assert_eq!(err.code, "conflict");
+        assert!(err.message.contains("restart=true"));
+    }
+
+    #[tokio::test]
+    async fn prepare_start_requests_shutdown_without_removing_capture() {
+        let device = connected_device("device-1");
+        let (capture_control, mut kill_rx, completion_tx) =
+            capture::CaptureController::test_controller();
+        let mut inner = RuntimeInner::default();
+        inner.captures.insert(
+            "capture-1".to_owned(),
+            capture_runtime_with_control("capture-1", &device, capture_control),
+        );
+
+        let plan = inner.prepare_start(&device, true).unwrap();
+        assert_eq!(plan.replaced_capture_id.as_deref(), Some("capture-1"));
+        assert!(plan.shutdown.is_some());
+        assert!(inner.captures.contains_key("capture-1"));
+        assert_eq!(kill_rx.recv().await, Some(()));
+
+        let snapshot = inner.captures["capture-1"].snapshot();
+        assert_eq!(
+            snapshot.stop_reason.as_deref(),
+            Some(RESTART_CAPTURE_REASON)
+        );
+        assert!(snapshot.running);
+
+        let _ = completion_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn prepare_stop_requests_shutdown_without_removing_capture() {
+        let device = connected_device("device-2");
+        let (capture_control, mut kill_rx, completion_tx) =
+            capture::CaptureController::test_controller();
+        let mut inner = RuntimeInner::default();
+        inner.captures.insert(
+            "capture-2".to_owned(),
+            capture_runtime_with_control("capture-2", &device, capture_control),
+        );
+
+        let _shutdown = inner
+            .prepare_stop(&CaptureSelector::new(Some("capture-2".to_owned()), None))
+            .unwrap();
+        assert!(inner.captures.contains_key("capture-2"));
+        assert_eq!(kill_rx.recv().await, Some(()));
+
+        let snapshot = inner.captures["capture-2"].snapshot();
+        assert_eq!(snapshot.stop_reason.as_deref(), Some(STOP_CAPTURE_REASON));
+        assert!(snapshot.running);
+
+        let _ = completion_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn restart_wait_timeout_has_clear_error() {
+        let device = connected_device("device-3");
+        let (capture_control, _kill_rx, _completion_tx) =
+            capture::CaptureController::test_controller();
+        let mut capture = capture_runtime_with_control("capture-3", &device, capture_control);
+        let shutdown = capture.request_shutdown(RESTART_CAPTURE_REASON);
+
+        let err = shutdown
+            .wait_with_timeout(
+                Duration::from_millis(10),
+                "waiting for existing capture `capture-3` on device `device-3` to stop before restart"
+                    .to_owned(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "conflict");
+        assert!(err.message.contains("timed out"));
+        assert!(err.message.contains("before restart"));
+    }
 }
