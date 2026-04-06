@@ -1,8 +1,10 @@
 use crate::capture::{self, CaptureHandle, ConnectedDevice};
 use crate::filter::Filter;
+use crate::log_buffer_config::log_buffer_capacity;
 use crate::log_entry::LogEntry;
 
-const MAX_LOG_ENTRIES: usize = 50_000;
+const COMPACT_BATCH_DIVISOR: usize = 50;
+const MIN_COMPACT_BATCH_SIZE: usize = 250;
 
 pub type PaneId = u64;
 
@@ -261,15 +263,22 @@ impl Pane {
             self.scroll_to_bottom = true;
         }
 
-        if self.entries.len() > MAX_LOG_ENTRIES {
+        let capacity = log_buffer_capacity();
+        if self.entries.len() > compact_threshold(capacity) {
             self.compact();
         }
     }
 
     fn compact(&mut self) {
-        let drain_count = MAX_LOG_ENTRIES / 4;
+        let capacity = log_buffer_capacity();
+        let drain_count = self.entries.len().saturating_sub(capacity);
+        if drain_count == 0 {
+            return;
+        }
+        let scroll_to_bottom = self.scroll_to_bottom;
         self.entries.drain(0..drain_count);
         self.rebuild_filtered();
+        self.scroll_to_bottom = scroll_to_bottom;
     }
 
     pub fn rebuild_filtered(&mut self) {
@@ -364,5 +373,84 @@ fn normalize_optional_string(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn compact_threshold(capacity: usize) -> usize {
+    capacity.saturating_add(compact_batch_size(capacity))
+}
+
+fn compact_batch_size(capacity: usize) -> usize {
+    (capacity / COMPACT_BATCH_DIVISOR)
+        .max(MIN_COMPACT_BATCH_SIZE)
+        .min(capacity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log_entry::{LogLevel, LogPlatform};
+
+    fn entry(tag: &str, message: &str) -> LogEntry {
+        LogEntry {
+            platform: LogPlatform::Android,
+            timestamp: "03-10 06:30:45.000".to_string(),
+            pid: Some(123),
+            tid: Some(456),
+            level: LogLevel::Info,
+            tag: tag.to_string(),
+            process: None,
+            subsystem: None,
+            category: None,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn compact_keeps_latest_entries_with_consistent_indices() {
+        let mut pane = Pane::new(None);
+        let capacity = log_buffer_capacity();
+        let total = capacity + 3;
+
+        for i in 0..total {
+            pane.entries.push(entry("Tag", &format!("message-{i}")));
+        }
+
+        pane.rebuild_filtered();
+        pane.compact();
+
+        assert_eq!(pane.entries.len(), capacity);
+        assert_eq!(pane.filtered_indices.len(), capacity);
+        assert_eq!(pane.entries.first().map(|entry| entry.message.as_str()), Some("message-3"));
+        assert_eq!(
+            pane.entries.last().map(|entry| entry.message.as_str()),
+            Some(format!("message-{}", total - 1).as_str())
+        );
+        assert_eq!(pane.filtered_indices.first().copied(), Some(0));
+        assert_eq!(pane.filtered_indices.last().copied(), Some(capacity - 1));
+    }
+
+    #[test]
+    fn compact_uses_headroom_before_rebuilding() {
+        let capacity = log_buffer_capacity();
+        let batch_size = compact_batch_size(capacity);
+        assert!(compact_threshold(capacity) > capacity);
+        assert_eq!(compact_threshold(capacity), capacity + batch_size);
+    }
+
+    #[test]
+    fn compact_preserves_existing_scroll_intent() {
+        let mut pane = Pane::new(None);
+        let capacity = log_buffer_capacity();
+
+        for i in 0..=capacity {
+            pane.entries.push(entry("Tag", &format!("message-{i}")));
+        }
+
+        pane.rebuild_filtered();
+        pane.scroll_to_bottom = false;
+        pane.compact();
+
+        assert!(!pane.scroll_to_bottom);
     }
 }

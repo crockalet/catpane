@@ -192,6 +192,10 @@ if [[ -n "$CODESIGN_IDENTITY" ]]; then
   fi
   /usr/bin/codesign "${APP_CODESIGN_ARGS[@]}" "$APP_DIR"
   /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+else
+  # Ad-hoc sign so macOS shows "unidentified developer" (bypassable)
+  # instead of "app is damaged" (not bypassable without xattr).
+  /usr/bin/codesign --force --deep --sign - "$APP_DIR"
 fi
 
 rm -f "$SHA_PATH"

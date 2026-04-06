@@ -139,6 +139,8 @@ Session and tag history are saved to:
 - `~/.config/catpane/session.json` — pane layout, filters, device selection
 - `~/.config/catpane/tag_history.txt` — recent tag filter expressions
 
+Set `CATPANE_LOG_BUFFER_CAPACITY` to override the default in-memory per-pane log retention (`50_000`). Android captures also use the same value to start from only the latest buffered lines before following live logs.
+
 ## License
 
 MIT

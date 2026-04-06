@@ -5,8 +5,6 @@ use crate::{
     log_entry::{LogEntry, LogLevel},
 };
 
-pub const DEFAULT_LOG_BUFFER_CAPACITY: usize = 50_000;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimestampParseError {
     raw: String,

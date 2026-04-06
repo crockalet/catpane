@@ -12,13 +12,13 @@ use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
     capture::{self, ConnectedDevice, DevicePlatform},
+    log_buffer_config::DEFAULT_LOG_BUFFER_CAPACITY,
     log_entry::LogLevel,
 };
 
 use super::{
     log_buffer::{
-        BufferedLogEntry, DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer, LogBufferMeta, LogPage,
-        LogPageMeta, LogQuery, PageOrder,
+        BufferedLogEntry, LogBuffer, LogBufferMeta, LogPage, LogPageMeta, LogQuery, PageOrder,
     },
     protocol::{CallToolParams, CallToolResult, JsonObject, JsonSchema, Tool, ToolContent},
 };

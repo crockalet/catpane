@@ -8,6 +8,7 @@ use tokio::{
 
 use crate::{
     adb, ios,
+    log_buffer_config::log_buffer_capacity,
     log_entry::{LogEntry, LogPlatform, parse_ios_log_ndjson_line, parse_logcat_line},
 };
 
@@ -189,6 +190,8 @@ fn spawn_android_capture(
             "-s".to_string(),
             device_id,
             "logcat".to_string(),
+            "-T".to_string(),
+            log_buffer_capacity().to_string(),
             "-v".to_string(),
             "threadtime".to_string(),
         ];

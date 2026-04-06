@@ -3,6 +3,7 @@ mod app;
 mod capture;
 mod filter;
 mod ios;
+mod log_buffer_config;
 mod log_entry;
 mod mcp;
 mod pane;
