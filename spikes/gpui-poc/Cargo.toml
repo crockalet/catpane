@@ -1,0 +1,9 @@
+[package]
+name = "gpui-poc"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 0 spike: GPUI uniform_list with Tokio mpsc for CatPane migration evaluation"
+
+[dependencies]
+gpui = "0.2.2"
+tokio = { version = "1", features = ["full"] }

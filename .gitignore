@@ -3,3 +3,6 @@
 .env
 
 codedb.snapshot
+
+# Spike build artifacts (standalone Cargo workspaces)
+spikes/*/target/
