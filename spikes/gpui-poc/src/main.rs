@@ -38,20 +38,42 @@
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Render, ScrollDelta, ScrollStrategy,
     ScrollWheelEvent, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size, uniform_list,
+    prelude::*, px, rems, rgb, rgba, size, uniform_list,
 };
 use std::sync::mpsc;
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 
-// Layout constants
-const STATUS_BAR_H: f32 = 28.0;
-const ROW_HEIGHT: f32 = 20.0;
-const SCROLLBAR_W: f32 = 6.0;
+// ── Design tokens (from reference HTML) ───────────────────────────────────────
+const SURFACE: u32 = 0x0d131e;          // root background
+const ON_SURFACE: u32 = 0xdde2f2;       // primary text
+const ON_SURFACE_VAR: u32 = 0xbfc8cb;   // secondary text (debug/verbose messages)
+const TIMESTAMP_DIM: u32 = 0x475569;    // slate-600 timestamps
+const PRIMARY_CYAN: u32 = 0xa3dcec;     // tag color, accents
+const TERTIARY_LAVENDER: u32 = 0xd7baff; // lavender accent (stick-to-bottom button)
+const LEVEL_INFO: u32 = 0x4ade80;       // green-400
+const LEVEL_DEBUG: u32 = 0x22d3ee;      // cyan-400
+const LEVEL_WARN: u32 = 0xfacc15;       // yellow-400
+const LEVEL_ERROR: u32 = 0xf87171;      // red-400
+const LEVEL_FATAL: u32 = 0xc678dd;      // lavender (fatal)
+const LEVEL_VERBOSE: u32 = 0x64748b;    // slate-500
+
+// Panel border: rgba(163, 220, 236, 0.10) — ~10% opacity cyan
+const BORDER_SUBTLE: u32 = 0xa3dcec1a;
+// Scrollbar thumb: rgba(163, 220, 236, 0.20) — ~20% opacity cyan
+const SCROLLBAR_THUMB: u32 = 0xa3dcec33;
+// Log area inner bg: black/20
+const LOG_AREA_BG: u32 = 0x00000033;
+// Header bg overlay: 50% opacity of SURFACE_LOWEST
+const HEADER_BG: u32 = 0x080e1980;
+// Status dot green glow
+const STATUS_GREEN: u32 = 0x22c55e;
+
+// Layout
+const HEADER_H: f32 = 36.0;
+const ROW_HEIGHT: f32 = 22.0;
+const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB_H: f32 = 24.0;
-// Stick-to-bottom button offset from the bottom-right of the log area.
-const BUTTON_OFFSET_X: f32 = 50.0; // pulled left (negative margin) so it sits over the list
-const BUTTON_OFFSET_Y: f32 = 48.0; // pulled up (negative margin) into the log area
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
@@ -110,38 +132,24 @@ impl Render for LogViewer {
         // Drain new entries from the Tokio side on every frame.
         let (added, _channel_alive) = self.drain_channel();
         if added > 0 && self.auto_scroll {
-            // Index-based scroll — no f32 offset arithmetic, no disappearing-content bugs.
             self.scroll_handle.scroll_to_item(
                 self.entries.len().saturating_sub(1),
                 ScrollStrategy::Bottom,
             );
         }
-        // Wakeup is handled by a background polling task spawned in main() that
-        // calls cx.refresh() every 32ms. cx.notify() from within render() is a
-        // no-op in GPUI 0.2.2 because WindowInvalidator drops it when
-        // draw_phase != DrawPhase::None.
 
         let count = self.entries.len();
         let auto_scroll = self.auto_scroll;
 
         // ── Scrollbar geometry ────────────────────────────────────────
-        // `f32::from(Pixels)` is stable via `impl From<Pixels> for f32` in
-        // gpui 0.2.2 (geometry.rs). The `Pixels` inner field is `pub(crate)`
-        // so direct `.0` access is unavailable outside the crate.
-        let viewport_h = f32::from(window.viewport_size().height) - STATUS_BAR_H;
+        let viewport_h = f32::from(window.viewport_size().height) - HEADER_H;
         let total_h = count as f32 * ROW_HEIGHT;
-        // `UniformListScrollHandle(pub Rc<RefCell<…>>)` exposes `.0` as a public
-        // tuple field. `base_handle: ScrollHandle` and `ScrollHandle::offset()`
-        // are both public in gpui 0.2.2 (elements/uniform_list.rs,
-        // elements/div.rs). This accesses current scroll position.
-        // GPUI scroll offsets are negative (0 at top, -max at bottom), so we
-        // negate to get a positive value for scrollbar math.
         let scroll_offset_y = -f32::from(self.scroll_handle.0.borrow().base_handle.offset().y);
 
         let thumb_h = if total_h > viewport_h && total_h > 0.0 {
             (viewport_h / total_h * viewport_h).max(SCROLLBAR_MIN_THUMB_H)
         } else {
-            viewport_h // whole track when everything fits
+            viewport_h
         };
         let max_scroll = (total_h - viewport_h).max(0.0);
         let thumb_top = if max_scroll > 0.0 {
@@ -150,173 +158,233 @@ impl Render for LogViewer {
             0.0
         };
 
-        // ── Layout ────────────────────────────────────────────────────
+        // ── Root layout ───────────────────────────────────────────────
         div()
             .size_full()
-            .bg(rgb(0x282c34)) // OneDark background
+            .bg(rgb(SURFACE))
             .flex()
             .flex_col()
-            // ── Status bar ──────────────────────────────────────────────
+            .p_4()
             .child(
-                div()
-                    .h(px(STATUS_BAR_H))
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .gap_4()
-                    .bg(rgb(0x21252b))
-                    .text_color(rgb(0x5c6370))
-                    .text_sm()
-                    .child(format!(
-                        "CatPane GPUI Spike  │  {} entries  │  uniform_list + Tokio mpsc{}",
-                        count,
-                        if auto_scroll { "  │  ⬇ auto" } else { "" }
-                    )),
-            )
-            // ── Log area: list + scrollbar side-by-side ──────────────────
-            .child(
+                // Glass panel
                 div()
                     .flex_1()
                     .flex()
-                    .flex_row()
-                    // Virtual log list
-                    .child(
-                        uniform_list(
-                            "log-entries",
-                            count,
-                            // cx.processor() renders only the visible row slice.
-                            // Memory: ~30 DOM rows regardless of count.
-                            cx.processor(
-                                |this: &mut LogViewer,
-                                 range: std::ops::Range<usize>,
-                                 _window,
-                                 _cx| {
-                                    let mut rows = Vec::with_capacity(range.len());
-                                    for i in range {
-                                        let entry = &this.entries[i];
-                                        let level_color = match entry.level {
-                                            'E' | 'F' => rgb(0xe06c75), // red
-                                            'W' => rgb(0xe5c07b),       // yellow
-                                            'I' => rgb(0x98c379),       // green
-                                            'D' => rgb(0x61afef),       // blue
-                                            _ => rgb(0x5c6370),         // dim grey
-                                        };
-                                        rows.push(
-                                            div()
-                                                .id(i)
-                                                .w_full()
-                                                .h(px(ROW_HEIGHT))
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .px_2()
-                                                .child(
-                                                    div()
-                                                        .w(px(140.0))
-                                                        .flex_shrink_0()
-                                                        .text_color(rgb(0x5c6370))
-                                                        .text_sm()
-                                                        .child(entry.timestamp.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w(px(14.0))
-                                                        .flex_shrink_0()
-                                                        .text_color(level_color)
-                                                        .text_sm()
-                                                        .child(entry.level.to_string()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w(px(130.0))
-                                                        .flex_shrink_0()
-                                                        .text_color(rgb(0x61afef))
-                                                        .text_sm()
-                                                        .child(entry.tag.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .text_color(rgb(0xabb2bf))
-                                                        .text_sm()
-                                                        .child(entry.message.clone()),
-                                                ),
-                                        );
-                                    }
-                                    rows
-                                },
-                            ),
-                        )
-                        .track_scroll(self.scroll_handle.clone())
-                        .flex_1()
-                        .h_full()
-                        // Only disable auto-follow when user scrolls UP (away from
-                        // bottom). Scrolling down at the bottom is harmless. GPUI
-                        // convention: positive delta.y = scroll up, negative = down.
-                        .on_scroll_wheel(cx.listener(
-                            |this, event: &ScrollWheelEvent, _w, cx| {
-                                let dy = match event.delta {
-                                    ScrollDelta::Pixels(pt) => f32::from(pt.y),
-                                    ScrollDelta::Lines(pt) => pt.y,
-                                };
-                                if this.auto_scroll && dy > 0.0 {
-                                    this.auto_scroll = false;
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                    )
-                    // ── Scrollbar ────────────────────────────────────────────
+                    .flex_col()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgba(BORDER_SUBTLE))
+                    .bg(rgba(0x1a202b99)) // surface-container at ~60% opacity
+                    .overflow_hidden()
+                    // ── Panel header ──────────────────────────────────
                     .child(
                         div()
-                            .w(px(SCROLLBAR_W))
-                            .h_full()
-                            .bg(rgb(0x1e2127)) // dark track
+                            .h(px(HEADER_H))
                             .flex()
-                            .flex_col()
-                            // spacer above thumb
-                            .child(div().h(px(thumb_top)))
-                            // thumb
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .bg(rgba(HEADER_BG))
+                            .border_b_1()
+                            .border_color(rgba(0xffffff0d)) // white/5
+                            .child(
+                                // Left: status dot + device name
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(8.0))
+                                            .h(px(8.0))
+                                            .rounded_full()
+                                            .bg(rgb(STATUS_GREEN)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(PRIMARY_CYAN))
+                                            .child("adb_logcat"),
+                                    ),
+                            )
+                            .child(
+                                // Right: entry count + auto indicator
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .text_size(rems(0.5625)) // 9px
+                                            .text_color(rgb(TIMESTAMP_DIM))
+                                            .child(format!("{} entries", count)),
+                                    )
+                                    .when(auto_scroll, |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(rems(0.5625))
+                                                .text_color(rgb(LEVEL_INFO))
+                                                .child("⬇ LIVE"),
+                                        )
+                                    }),
+                            ),
+                    )
+                    // ── Log area (relative wrapper for absolute button) ──
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .bg(rgba(LOG_AREA_BG))
+                            // Virtual log list
+                            .child(
+                                uniform_list(
+                                    "log-entries",
+                                    count,
+                                    cx.processor(
+                                        |this: &mut LogViewer,
+                                         range: std::ops::Range<usize>,
+                                         _window,
+                                         _cx| {
+                                            let mut rows = Vec::with_capacity(range.len());
+                                            for i in range {
+                                                let entry = &this.entries[i];
+                                                let (level_label, level_color) = level_display(entry.level);
+                                                let msg_color = match entry.level {
+                                                    'D' | 'V' => ON_SURFACE_VAR,
+                                                    'E' | 'F' => LEVEL_ERROR,
+                                                    _ => ON_SURFACE,
+                                                };
+                                                rows.push(
+                                                    div()
+                                                        .id(i)
+                                                        .w_full()
+                                                        .h(px(ROW_HEIGHT))
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_4()
+                                                        .px_4()
+                                                        .child(
+                                                            // Timestamp
+                                                            div()
+                                                                .w(px(140.0))
+                                                                .flex_shrink_0()
+                                                                .text_size(rems(0.6875)) // 11px
+                                                                .text_color(rgb(TIMESTAMP_DIM))
+                                                                .child(format!("[{}]", entry.timestamp)),
+                                                        )
+                                                        .child(
+                                                            // Level (full word)
+                                                            div()
+                                                                .w(px(56.0))
+                                                                .flex_shrink_0()
+                                                                .text_size(rems(0.6875))
+                                                                .text_color(rgb(level_color))
+                                                                .child(level_label),
+                                                        )
+                                                        .child(
+                                                            // Tag
+                                                            div()
+                                                                .w(px(140.0))
+                                                                .flex_shrink_0()
+                                                                .text_size(rems(0.6875))
+                                                                .text_color(rgb(PRIMARY_CYAN))
+                                                                .overflow_hidden()
+                                                                .child(entry.tag.clone()),
+                                                        )
+                                                        .child(
+                                                            // Message
+                                                            div()
+                                                                .flex_1()
+                                                                .text_size(rems(0.6875))
+                                                                .text_color(rgb(msg_color))
+                                                                .overflow_hidden()
+                                                                .child(entry.message.clone()),
+                                                        ),
+                                                );
+                                            }
+                                            rows
+                                        },
+                                    ),
+                                )
+                                .track_scroll(self.scroll_handle.clone())
+                                .flex_1()
+                                .h_full()
+                                .on_scroll_wheel(cx.listener(
+                                    |this, event: &ScrollWheelEvent, _w, cx| {
+                                        let dy = match event.delta {
+                                            ScrollDelta::Pixels(pt) => f32::from(pt.y),
+                                            ScrollDelta::Lines(pt) => pt.y,
+                                        };
+                                        if this.auto_scroll && dy > 0.0 {
+                                            this.auto_scroll = false;
+                                            cx.notify();
+                                        }
+                                    },
+                                )),
+                            )
+                            // ── Scrollbar ────────────────────────────────
                             .child(
                                 div()
-                                    .w_full()
-                                    .h(px(thumb_h))
-                                    .rounded_md()
-                                    .bg(rgb(0x4b5263)), // medium-grey thumb
-                            ),
+                                    .w(px(SCROLLBAR_W))
+                                    .h_full()
+                                    .bg(rgba(0x0d131e80)) // dark track
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().h(px(thumb_top)))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(thumb_h))
+                                            .rounded_sm()
+                                            .bg(rgba(SCROLLBAR_THUMB)),
+                                    ),
+                            )
+                            // ── Stick-to-bottom button (absolute overlay) ─
+                            .when(!auto_scroll, |area| {
+                                area.child(
+                                    div()
+                                        .id("stick-to-bottom")
+                                        .absolute()
+                                        .bottom(px(16.0))
+                                        .right(px(20.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .w(px(32.0))
+                                        .h(px(32.0))
+                                        .rounded_full()
+                                        .bg(rgb(TERTIARY_LAVENDER))
+                                        .text_color(rgb(SURFACE))
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.auto_scroll = true;
+                                            this.scroll_handle.scroll_to_item(
+                                                this.entries.len().saturating_sub(1),
+                                                ScrollStrategy::Bottom,
+                                            );
+                                            cx.notify();
+                                        }))
+                                        .child("↓"),
+                                )
+                            }),
                     ),
             )
-            // ── Stick-to-bottom button (floats over list when !auto_scroll) ─
-            // Rendered last so it layers above the list and scrollbar.
-            .when(!auto_scroll, |root| {
-                root.child(
-                    div()
-                        .id("stick-to-bottom")
-                        // Absolute position: bottom-right of the window, above scrollbar.
-                        // Negative bottom margin lifts it into the log area.
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .ml(px(-BUTTON_OFFSET_X)) // pull left to sit over list, not below
-                        .mt(px(-BUTTON_OFFSET_Y)) // pull up into the log area
-                        .rounded_full()
-                        .bg(rgb(0x61afef)) // OneDark blue
-                        .text_color(rgb(0xffffff))
-                        .text_base()
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.auto_scroll = true;
-                            this.scroll_handle.scroll_to_item(
-                                this.entries.len().saturating_sub(1),
-                                ScrollStrategy::Bottom,
-                            );
-                            cx.notify();
-                        }))
-                        .child("↓"),
-                )
-            })
+    }
+}
+
+/// Map level char to (display label, color).
+fn level_display(level: char) -> (&'static str, u32) {
+    match level {
+        'I' => ("INFO", LEVEL_INFO),
+        'D' => ("DEBUG", LEVEL_DEBUG),
+        'W' => ("WARN", LEVEL_WARN),
+        'E' => ("ERROR", LEVEL_ERROR),
+        'F' => ("FATAL", LEVEL_FATAL),
+        'V' => ("VERBOSE", LEVEL_VERBOSE),
+        _ => ("?", LEVEL_VERBOSE),
     }
 }
 
