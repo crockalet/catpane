@@ -640,6 +640,7 @@ dependencies = [
 name = "catpane"
 version = "0.2.3"
 dependencies = [
+ "catpane-core",
  "eframe",
  "egui",
  "mdns-sd",
@@ -647,6 +648,19 @@ dependencies = [
  "objc2-app-kit 0.2.2",
  "qrcode",
  "raw-window-handle",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "catpane-core"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "mdns-sd",
+ "qrcode",
  "regex",
  "serde",
  "serde_json",
