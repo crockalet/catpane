@@ -35,6 +35,7 @@
 //! └───────────────────────────────────────────╰────╯─┴──────┴────┘
 //!                                             list   scrbar  (6px)
 
+use catpane_core::log_entry::{LogEntry, LogLevel, LogPlatform, parse_logcat_line};
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Render, ScrollDelta, ScrollStrategy,
     ScrollWheelEvent, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
@@ -74,17 +75,6 @@ const HEADER_H: f32 = 36.0;
 const ROW_HEIGHT: f32 = 22.0;
 const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB_H: f32 = 24.0;
-
-// ── Data model ────────────────────────────────────────────────────────────────
-
-/// A single log line, mirroring the CatPane `LogEntry` structure.
-#[derive(Clone)]
-struct LogEntry {
-    timestamp: String,
-    level: char,
-    tag: String,
-    message: String,
-}
 
 // ── GPUI entity ───────────────────────────────────────────────────────────────
 
@@ -252,8 +242,8 @@ impl Render for LogViewer {
                                                 let entry = &this.entries[i];
                                                 let (level_label, level_color) = level_display(entry.level);
                                                 let msg_color = match entry.level {
-                                                    'D' | 'V' => ON_SURFACE_VAR,
-                                                    'E' | 'F' => LEVEL_ERROR,
+                                                    LogLevel::Debug | LogLevel::Verbose => ON_SURFACE_VAR,
+                                                    LogLevel::Error | LogLevel::Fatal => LEVEL_ERROR,
                                                     _ => ON_SURFACE,
                                                 };
                                                 rows.push(
@@ -375,16 +365,15 @@ impl Render for LogViewer {
     }
 }
 
-/// Map level char to (display label, color).
-fn level_display(level: char) -> (&'static str, u32) {
+/// Map LogLevel to (display label, color).
+fn level_display(level: LogLevel) -> (&'static str, u32) {
     match level {
-        'I' => ("INFO", LEVEL_INFO),
-        'D' => ("DEBUG", LEVEL_DEBUG),
-        'W' => ("WARN", LEVEL_WARN),
-        'E' => ("ERROR", LEVEL_ERROR),
-        'F' => ("FATAL", LEVEL_FATAL),
-        'V' => ("VERBOSE", LEVEL_VERBOSE),
-        _ => ("?", LEVEL_VERBOSE),
+        LogLevel::Info => ("INFO", LEVEL_INFO),
+        LogLevel::Debug => ("DEBUG", LEVEL_DEBUG),
+        LogLevel::Warn => ("WARN", LEVEL_WARN),
+        LogLevel::Error => ("ERROR", LEVEL_ERROR),
+        LogLevel::Fatal => ("FATAL", LEVEL_FATAL),
+        LogLevel::Verbose => ("VERBOSE", LEVEL_VERBOSE),
     }
 }
 
@@ -445,7 +434,10 @@ fn main() {
 
 // ── Real adb logcat data source ───────────────────────────────────────────────
 
+// stream_logcat now uses catpane_core::log_entry::parse_logcat_line (imported at top)
+
 /// Spawn `adb logcat -v threadtime` and pipe parsed entries through the channel.
+/// Falls back to demo data if adb is unavailable or no device is connected.
 async fn stream_logcat(tx: mpsc::Sender<LogEntry>) {
     let mut child = match tokio::process::Command::new("adb")
         .args(["logcat", "-v", "threadtime", "-T", "1000"])
@@ -456,8 +448,8 @@ async fn stream_logcat(tx: mpsc::Sender<LogEntry>) {
     {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("Failed to spawn adb logcat: {e}");
-            eprintln!("Make sure adb is in PATH and a device/emulator is connected.");
+            eprintln!("adb logcat failed ({e}), falling back to demo data");
+            stream_demo(tx).await;
             return;
         }
     };
@@ -465,12 +457,37 @@ async fn stream_logcat(tx: mpsc::Sender<LogEntry>) {
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            eprintln!("Failed to capture adb stdout");
+            eprintln!("Failed to capture adb stdout, falling back to demo data");
+            stream_demo(tx).await;
             return;
         }
     };
 
     let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    // Read with a timeout — if adb connects but no lines arrive within 3s
+    // (e.g. no device), fall back to demo data.
+    let first_line = tokio::time::timeout(
+        Duration::from_secs(3),
+        lines.next_line(),
+    )
+    .await;
+
+    match first_line {
+        Ok(Ok(Some(line))) => {
+            if let Some(entry) = parse_logcat_line(&line) {
+                if tx.send(entry).is_err() {
+                    return;
+                }
+            }
+        }
+        _ => {
+            eprintln!("No logcat output within 3s, falling back to demo data");
+            stream_demo(tx).await;
+            return;
+        }
+    }
+
     while let Ok(Some(line)) = lines.next_line().await {
         if let Some(entry) = parse_logcat_line(&line) {
             if tx.send(entry).is_err() {
@@ -480,46 +497,79 @@ async fn stream_logcat(tx: mpsc::Sender<LogEntry>) {
     }
 }
 
-/// Parse a logcat `-v threadtime` line.
-/// Format: `MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG     : message`
-fn parse_logcat_line(line: &str) -> Option<LogEntry> {
-    if line.len() < 33 {
-        return None;
-    }
-    let timestamp = line.get(0..18)?.trim().to_string();
-    let rest = line.get(18..)?.trim_start();
+// ── Demo data fallback ───────────────────────────────────────────────────────
 
-    // Skip PID
-    let (_, rest) = split_ws(rest)?;
-    // Skip TID
-    let (_, rest) = split_ws(rest)?;
-    // Level
-    let (level_str, rest) = split_ws(rest)?;
-    let level = level_str.chars().next()?;
-    if !matches!(level, 'V' | 'D' | 'I' | 'W' | 'E' | 'F') {
-        return None;
-    }
-    // Tag : message
-    let (tag, message) = if let Some(colon_pos) = rest.find(": ") {
-        (
-            rest[..colon_pos].trim().to_string(),
-            rest[colon_pos + 2..].to_string(),
-        )
-    } else {
-        (rest.trim().to_string(), String::new())
-    };
+const TAGS: [&str; 10] = [
+    "MainActivity", "NetworkManager", "DatabaseHelper", "UIController",
+    "ServiceLocator", "EventBus", "CrashReporter", "OkHttp", "GC", "ViewRootImpl",
+];
 
-    Some(LogEntry {
-        timestamp,
-        level,
-        tag,
-        message,
-    })
+const MESSAGES: [&[&str]; 10] = [
+    &["onCreate", "onResume", "onPause", "onStop", "setContentView completed"],
+    &["GET https://api.example.com/v2/users 200 (142ms)", "POST /auth/refresh 401", "socket timeout after 30000ms"],
+    &["query SELECT * FROM logs WHERE ts > ? returned 847 rows (12ms)", "beginTransaction", "VACUUM completed in 340ms"],
+    &["measure/layout pass: 4.2ms", "draw frame: 6.1ms", "invalidate requested"],
+    &["resolve<AuthService>", "resolve<Logger>", "circular dependency detected in AnalyticsModule"],
+    &["dispatch USER_LOGIN", "dispatch FETCH_FEED", "3 subscribers notified for DATA_REFRESH"],
+    &["FATAL EXCEPTION: main", "java.lang.NullPointerException", "ANR in com.example.app (5012ms)"],
+    &["<-- 200 OK https://cdn.example.com/img/banner.webp (87ms)", "TLS handshake completed"],
+    &["GC_CONCURRENT freed 2408K, 18% free 14312K/17408K", "Background GC freed 1204K"],
+    &["performTraversals: 8.3ms", "Choreographer: Skipped 3 frames!", "Surface destroyed"],
+];
+
+/// Fallback: generates demo data when adb is unavailable.
+async fn stream_demo(tx: mpsc::Sender<LogEntry>) {
+    for i in 0usize..50_000 {
+        if tx.send(make_entry(i)).is_err() {
+            return;
+        }
+    }
+    let mut i = 50_000usize;
+    loop {
+        if tx.send(make_entry(i)).is_err() {
+            break;
+        }
+        i += 1;
+        if i % 10 == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
-/// Split at the first whitespace, returning (word, rest_trimmed).
-fn split_ws(s: &str) -> Option<(&str, &str)> {
-    let s = s.trim_start();
-    let end = s.find(char::is_whitespace)?;
-    Some((&s[..end], s[end..].trim_start()))
+fn mix(i: usize) -> usize {
+    let mut h = i.wrapping_mul(0x9E3779B97F4A7C15);
+    h ^= h >> 16;
+    h.wrapping_mul(0xBF58476D1CE4E5B9)
+}
+
+fn make_entry(i: usize) -> LogEntry {
+    let h = mix(i);
+    let tag_idx = h % TAGS.len();
+    let level = match h % 20 {
+        0 => LogLevel::Error,
+        1..=2 => LogLevel::Warn,
+        3..=5 => LogLevel::Verbose,
+        6..=11 => LogLevel::Info,
+        _ => LogLevel::Debug,
+    };
+    let msgs = MESSAGES[tag_idx];
+    LogEntry {
+        platform: LogPlatform::Android,
+        timestamp: format!(
+            "04-{:02} {:02}:{:02}:{:02}.{:03}",
+            (i / 86_400) % 28 + 1,
+            (i / 3_600) % 24,
+            (i / 60) % 60,
+            i % 60,
+            i % 1_000,
+        ),
+        pid: Some(1000 + (h % 200) as u32),
+        tid: Some((2000 + h % 50) as u64),
+        level,
+        tag: TAGS[tag_idx].to_string(),
+        process: None,
+        subsystem: None,
+        category: None,
+        message: msgs[h / 10 % msgs.len()].to_string(),
+    }
 }

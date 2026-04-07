@@ -1,7 +1,6 @@
 mod adb;
 mod app;
 mod capture;
-mod command;
 mod filter;
 mod ios;
 mod log_buffer_config;

@@ -1,9 +1,14 @@
+[workspace]
+members = ["catpane-core"]
+exclude = ["spikes/gpui-poc"]
+
 [package]
 name = "catpane"
 version = "0.2.3"
 edition = "2024"
 
 [dependencies]
+catpane-core = { path = "catpane-core", features = ["egui"] }
 eframe = "0.31"
 egui = "0.31"
 tokio = { version = "1", features = ["full"] }
