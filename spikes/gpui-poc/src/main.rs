@@ -1,4 +1,4 @@
-//! Phase 0 spike: GPUI uniform_list rendering 50k log rows with Tokio mpsc integration.
+//! Phase 0 spike: GPUI uniform_list rendering real adb logcat data with Tokio mpsc integration.
 //!
 //! Goals
 //! ─────
@@ -10,14 +10,15 @@
 //! Architecture
 //! ────────────
 //! ┌─ Tokio thread ──────────────────────────────────────────────────┐
-//! │  stream_entries() generates 50 000 burst entries, then streams  │
-//! │  ~100/s. Entries go through std::sync::mpsc::Sender.            │
+//! │  stream_logcat() runs `adb logcat -v threadtime -T 1000`,      │
+//! │  parses lines, sends LogEntry via std::sync::mpsc::Sender.     │
 //! └──────────────────────────────────────────────────────────┬──────┘
 //!                                                            │ mpsc
 //! ┌─ GPUI main thread ───────────────────────────────────────▼──────┐
-//! │  LogViewer::render() drains up to 500 entries per frame,        │
-//! │  requests next frame via cx.notify() while data is flowing,     │
-//! │  and calls scroll_handle.scroll_to_item() for auto-scroll.      │
+//! │  LogViewer::render() drains up to 500 entries per frame.        │
+//! │  A background polling task calls cx.refresh() every 32ms to     │
+//! │  schedule platform repaints (cx.notify() inside render is a     │
+//! │  no-op in GPUI 0.2.2).                                         │
 //! │  uniform_list renders ONLY the visible rows (virtual scroll).   │
 //! └─────────────────────────────────────────────────────────────────┘
 //!
@@ -35,12 +36,13 @@
 //!                                             list   scrbar  (6px)
 
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, Render, ScrollStrategy,
+    App, Application, Bounds, ClickEvent, Context, Render, ScrollDelta, ScrollStrategy,
     ScrollWheelEvent, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, rgb, size, uniform_list,
 };
 use std::sync::mpsc;
 use std::time::Duration;
+use tokio::io::AsyncBufReadExt;
 
 // Layout constants
 const STATUS_BAR_H: f32 = 28.0;
@@ -79,18 +81,25 @@ struct LogViewer {
 
 impl LogViewer {
     /// Drain up to 500 entries per frame, mirroring `Pane::ingest_lines()`.
-    fn drain_channel(&mut self) -> usize {
+    /// Returns (entries_added, channel_alive). When the sender is dropped,
+    /// channel_alive becomes false and we stop requesting frames.
+    fn drain_channel(&mut self) -> (usize, bool) {
         let mut count = 0;
+        let mut alive = true;
         for _ in 0..500 {
             match self.rx.try_recv() {
                 Ok(entry) => {
                     self.entries.push(entry);
                     count += 1;
                 }
-                Err(_) => break,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    alive = false;
+                    break;
+                }
             }
         }
-        count
+        (count, alive)
     }
 }
 
@@ -99,18 +108,18 @@ impl LogViewer {
 impl Render for LogViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Drain new entries from the Tokio side on every frame.
-        let added = self.drain_channel();
-        if added > 0 {
-            if self.auto_scroll {
-                // Index-based scroll — no f32 offset arithmetic, no disappearing-content bugs.
-                self.scroll_handle.scroll_to_item(
-                    self.entries.len().saturating_sub(1),
-                    ScrollStrategy::Bottom,
-                );
-            }
-            // Request another render next frame to pick up any remaining entries.
-            cx.notify();
+        let (added, _channel_alive) = self.drain_channel();
+        if added > 0 && self.auto_scroll {
+            // Index-based scroll — no f32 offset arithmetic, no disappearing-content bugs.
+            self.scroll_handle.scroll_to_item(
+                self.entries.len().saturating_sub(1),
+                ScrollStrategy::Bottom,
+            );
         }
+        // Wakeup is handled by a background polling task spawned in main() that
+        // calls cx.refresh() every 32ms. cx.notify() from within render() is a
+        // no-op in GPUI 0.2.2 because WindowInvalidator drops it when
+        // draw_phase != DrawPhase::None.
 
         let count = self.entries.len();
         let auto_scroll = self.auto_scroll;
@@ -124,8 +133,10 @@ impl Render for LogViewer {
         // `UniformListScrollHandle(pub Rc<RefCell<…>>)` exposes `.0` as a public
         // tuple field. `base_handle: ScrollHandle` and `ScrollHandle::offset()`
         // are both public in gpui 0.2.2 (elements/uniform_list.rs,
-        // elements/scroll_handle.rs). This accesses current scroll position.
-        let scroll_offset_y = f32::from(self.scroll_handle.0.borrow().base_handle.offset().y);
+        // elements/div.rs). This accesses current scroll position.
+        // GPUI scroll offsets are negative (0 at top, -max at bottom), so we
+        // negate to get a positive value for scrollbar math.
+        let scroll_offset_y = -f32::from(self.scroll_handle.0.borrow().base_handle.offset().y);
 
         let thumb_h = if total_h > viewport_h && total_h > 0.0 {
             (viewport_h / total_h * viewport_h).max(SCROLLBAR_MIN_THUMB_H)
@@ -239,11 +250,16 @@ impl Render for LogViewer {
                         .track_scroll(self.scroll_handle.clone())
                         .flex_1()
                         .h_full()
-                        // Any manual scroll gesture disables auto-follow.
-                        // The user re-enables it via the ↓ button.
+                        // Only disable auto-follow when user scrolls UP (away from
+                        // bottom). Scrolling down at the bottom is harmless. GPUI
+                        // convention: positive delta.y = scroll up, negative = down.
                         .on_scroll_wheel(cx.listener(
-                            |this, _event: &ScrollWheelEvent, _w, cx| {
-                                if this.auto_scroll {
+                            |this, event: &ScrollWheelEvent, _w, cx| {
+                                let dy = match event.delta {
+                                    ScrollDelta::Pixels(pt) => f32::from(pt.y),
+                                    ScrollDelta::Lines(pt) => pt.y,
+                                };
+                                if this.auto_scroll && dy > 0.0 {
                                     this.auto_scroll = false;
                                     cx.notify();
                                 }
@@ -318,16 +334,29 @@ fn main() {
             .enable_all()
             .build()
             .expect("failed to build Tokio runtime");
-        rt.block_on(stream_entries(tx));
+        rt.block_on(stream_logcat(tx));
     });
 
     Application::new().run(|cx: &mut App| {
         let viewer = cx.new(|_| LogViewer {
-            entries: Vec::with_capacity(51_000), // matches CatPane's buffer capacity
+            entries: Vec::with_capacity(51_000),
             rx,
             auto_scroll: true,
             scroll_handle: UniformListScrollHandle::new(),
         });
+
+        // Background wakeup task: cx.notify() inside render() is a no-op in GPUI
+        // 0.2.2 (WindowInvalidator drops it when draw_phase != None). Instead we
+        // poll from GPUI's foreground executor which runs outside the draw phase.
+        cx.spawn(async |cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(32)).await;
+                if cx.refresh().is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), cx);
 
@@ -346,58 +375,83 @@ fn main() {
     });
 }
 
-// ── Tokio background log generator ───────────────────────────────────────────
+// ── Real adb logcat data source ───────────────────────────────────────────────
 
-/// Simulates adb logcat output: 50 000-entry burst followed by ~100 entries/s.
-async fn stream_entries(tx: mpsc::Sender<LogEntry>) {
-    const LEVELS: [char; 5] = ['V', 'D', 'I', 'W', 'E'];
-    const TAGS: [&str; 7] = [
-        "MainActivity",
-        "NetworkManager",
-        "DatabaseHelper",
-        "UIController",
-        "ServiceLocator",
-        "EventBus",
-        "CrashReporter",
-    ];
-
-    // Phase 1 — burst: fill the initial 50 000 entries as fast as possible.
-    for i in 0usize..50_000 {
-        let level = LEVELS[i % LEVELS.len()];
-        let tag = TAGS[i % TAGS.len()];
-        if tx.send(make_entry(i, level, tag, "Message")).is_err() {
+/// Spawn `adb logcat -v threadtime` and pipe parsed entries through the channel.
+async fn stream_logcat(tx: mpsc::Sender<LogEntry>) {
+    let mut child = match tokio::process::Command::new("adb")
+        .args(["logcat", "-v", "threadtime", "-T", "1000"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("Failed to spawn adb logcat: {e}");
+            eprintln!("Make sure adb is in PATH and a device/emulator is connected.");
             return;
         }
-    }
+    };
 
-    // Phase 2 — live stream: ~100 entries/second, indefinitely.
-    let mut i = 50_000usize;
-    loop {
-        let level = LEVELS[i % LEVELS.len()];
-        let tag = TAGS[i % TAGS.len()];
-        if tx.send(make_entry(i, level, tag, "Live")).is_err() {
-            break;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            eprintln!("Failed to capture adb stdout");
+            return;
         }
-        i += 1;
-        // Sleep 1 s every 100 entries ≈ 100 entries/second.
-        if i % 100 == 0 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(entry) = parse_logcat_line(&line) {
+            if tx.send(entry).is_err() {
+                break;
+            }
         }
     }
 }
 
-fn make_entry(i: usize, level: char, tag: &str, kind: &str) -> LogEntry {
-    LogEntry {
-        timestamp: format!(
-            "03-{:02} {:02}:{:02}:{:02}.{:03}",
-            (i / 86_400) % 28 + 1,
-            (i / 3_600) % 24,
-            (i / 60) % 60,
-            i % 60,
-            i % 1_000,
-        ),
-        level,
-        tag: tag.to_string(),
-        message: format!("{kind} #{i}: example log output from {tag}"),
+/// Parse a logcat `-v threadtime` line.
+/// Format: `MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG     : message`
+fn parse_logcat_line(line: &str) -> Option<LogEntry> {
+    if line.len() < 33 {
+        return None;
     }
+    let timestamp = line.get(0..18)?.trim().to_string();
+    let rest = line.get(18..)?.trim_start();
+
+    // Skip PID
+    let (_, rest) = split_ws(rest)?;
+    // Skip TID
+    let (_, rest) = split_ws(rest)?;
+    // Level
+    let (level_str, rest) = split_ws(rest)?;
+    let level = level_str.chars().next()?;
+    if !matches!(level, 'V' | 'D' | 'I' | 'W' | 'E' | 'F') {
+        return None;
+    }
+    // Tag : message
+    let (tag, message) = if let Some(colon_pos) = rest.find(": ") {
+        (
+            rest[..colon_pos].trim().to_string(),
+            rest[colon_pos + 2..].to_string(),
+        )
+    } else {
+        (rest.trim().to_string(), String::new())
+    };
+
+    Some(LogEntry {
+        timestamp,
+        level,
+        tag,
+        message,
+    })
+}
+
+/// Split at the first whitespace, returning (word, rest_trimmed).
+fn split_ws(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    let end = s.find(char::is_whitespace)?;
+    Some((&s[..end], s[end..].trim_start()))
 }
