@@ -110,6 +110,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
           TARGET_TRIPLE: ${{ matrix.target }}
+          CODESIGN_IDENTITY: ${{ env.APPLE_CODESIGN_IDENTITY }}
         run: scripts/package-macos-app.sh
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

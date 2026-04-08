@@ -9,7 +9,7 @@ APP_NAME="${APP_NAME:-CatPane}"
 ARCHIVE_ROOT="${ARCHIVE_ROOT:-$ROOT_DIR/dist}"
 ICON_FILE="${ICON_FILE:-$ROOT_DIR/assets/CatPane.icns}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-${APPLE_CODESIGN_IDENTITY:-}}"
 CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-}"
 APPLE_NOTARY_KEY_ID="${APPLE_NOTARY_KEY_ID:-}"
 APPLE_NOTARY_ISSUER="${APPLE_NOTARY_ISSUER:-}"
@@ -199,12 +199,13 @@ if [[ -n "$CODESIGN_IDENTITY" ]]; then
     APP_CODESIGN_ARGS+=(--entitlements "$CODESIGN_ENTITLEMENTS")
   fi
   /usr/bin/codesign "${APP_CODESIGN_ARGS[@]}" "$APP_DIR"
-  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 else
-  # Ad-hoc sign so macOS shows "unidentified developer" (bypassable)
-  # instead of "app is damaged" (not bypassable without xattr).
+  # Ad-hoc signing keeps the bundle internally consistent when no
+  # Developer ID identity is available yet.
   /usr/bin/codesign --force --deep --sign - "$APP_DIR"
 fi
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 rm -f "$SHA_PATH"
 create_release_zip
