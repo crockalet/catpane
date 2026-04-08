@@ -4,6 +4,11 @@ use super::theme::*;
 use crate::app::{App, QrPairStatus, QrPairingState};
 use catpane_core::capture::ConnectedDevice;
 
+const SIDEBAR_CARD_LEFT_MARGIN: f32 = 4.0;
+const SIDEBAR_CARD_VERTICAL_MARGIN: f32 = 4.0;
+const SIDEBAR_CARD_INNER_MARGIN: f32 = 6.0;
+const SIDEBAR_CARD_STROKE_WIDTH: f32 = 1.0;
+const SIDEBAR_SECTION_GAP: f32 = 6.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
 const SIDEBAR_MIN_WIDTH: f32 = 240.0;
 const SIDEBAR_MAX_WIDTH: f32 = 420.0;
@@ -11,45 +16,148 @@ const SIDEBAR_RAIL_WIDTH: f32 = 40.0;
 const SIDEBAR_RAIL_BUTTON_SIZE: f32 = 24.0;
 
 pub fn draw_sidebar(ctx: &egui::Context, app: &mut App) {
+    let sidebar_open = app.sidebar_open;
+    let backdrop = if ctx.style().visuals.dark_mode {
+        OD_BG_BACKDROP
+    } else {
+        OL_BG_BACKDROP
+    };
     let mut panel = egui::SidePanel::left("device_manager_sidebar");
     panel = panel
-        .resizable(app.sidebar_open)
-        .show_separator_line(app.sidebar_open);
+        .frame(egui::Frame::new().fill(backdrop))
+        .resizable(sidebar_open)
+        .show_separator_line(false);
 
-    if app.sidebar_open {
+    if sidebar_open {
         panel = panel
-            .default_width(SIDEBAR_RAIL_WIDTH + SIDEBAR_WIDTH)
-            .min_width(SIDEBAR_RAIL_WIDTH + SIDEBAR_MIN_WIDTH)
-            .max_width(SIDEBAR_RAIL_WIDTH + SIDEBAR_MAX_WIDTH);
+            .default_width(sidebar_panel_width(
+                SIDEBAR_RAIL_WIDTH + SIDEBAR_WIDTH,
+                true,
+            ))
+            .min_width(sidebar_panel_width(
+                SIDEBAR_RAIL_WIDTH + SIDEBAR_MIN_WIDTH,
+                true,
+            ))
+            .max_width(sidebar_panel_width(
+                SIDEBAR_RAIL_WIDTH + SIDEBAR_MAX_WIDTH,
+                true,
+            ));
     } else {
         panel = panel
-            .default_width(SIDEBAR_RAIL_WIDTH)
-            .min_width(SIDEBAR_RAIL_WIDTH)
-            .max_width(SIDEBAR_RAIL_WIDTH);
+            .default_width(sidebar_panel_width(SIDEBAR_RAIL_WIDTH, false))
+            .min_width(sidebar_panel_width(SIDEBAR_RAIL_WIDTH, false))
+            .max_width(sidebar_panel_width(SIDEBAR_RAIL_WIDTH, false));
     }
 
     panel.show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            let rail_size = egui::vec2(SIDEBAR_RAIL_WIDTH, ui.available_height());
-            ui.allocate_ui_with_layout(rail_size, Layout::top_down(Align::Center), |ui| {
-                draw_sidebar_rail(ui, app);
-            });
+        let panel_rect = ui.max_rect();
+        let card_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                panel_rect.min.x + SIDEBAR_CARD_LEFT_MARGIN,
+                panel_rect.min.y + SIDEBAR_CARD_VERTICAL_MARGIN,
+            ),
+            egui::pos2(
+                panel_rect.max.x,
+                panel_rect.max.y - SIDEBAR_CARD_VERTICAL_MARGIN,
+            ),
+        );
 
-            if app.sidebar_open {
-                ui.separator();
-                let content_size = ui.available_size();
-                ui.allocate_ui_with_layout(content_size, Layout::top_down(Align::Min), |ui| {
-                    draw_sidebar_contents(ui, app);
-                });
-            }
-        });
+        let (card_fill, card_stroke) = sidebar_card_style(ui);
+        ui.painter().rect(
+            card_rect,
+            8.0,
+            card_fill,
+            card_stroke,
+            egui::StrokeKind::Inside,
+        );
+
+        let content_inset = SIDEBAR_CARD_INNER_MARGIN + SIDEBAR_CARD_STROKE_WIDTH;
+        let content_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                card_rect.min.x + content_inset,
+                card_rect.min.y + content_inset,
+            ),
+            egui::pos2(
+                card_rect.max.x - content_inset,
+                card_rect.max.y - content_inset,
+            ),
+        );
+
+        let mut card_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+        card_ui.set_clip_rect(card_rect);
+        card_ui.set_min_size(content_rect.size());
+        let rail_rect = egui::Rect::from_min_max(
+            content_rect.min,
+            egui::pos2(content_rect.min.x + SIDEBAR_RAIL_WIDTH, content_rect.max.y),
+        );
+        let mut rail_ui = card_ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rail_rect)
+                .layout(Layout::top_down(Align::Center)),
+        );
+        rail_ui.set_clip_rect(card_rect);
+        draw_sidebar_rail(&mut rail_ui, app, sidebar_open);
+
+        if sidebar_open {
+            let separator_x = rail_rect.max.x + SIDEBAR_SECTION_GAP * 0.5;
+            ui.painter()
+                .vline(separator_x, content_rect.y_range(), separator_stroke(ui));
+
+            let body_rect = egui::Rect::from_min_max(
+                egui::pos2(rail_rect.max.x + SIDEBAR_SECTION_GAP, content_rect.min.y),
+                content_rect.max,
+            );
+            let mut body_ui = card_ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(body_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            body_ui.set_clip_rect(card_rect);
+            body_ui.set_min_size(body_rect.size());
+            draw_sidebar_contents(&mut body_ui, app);
+        }
+        ui.expand_to_include_rect(card_rect);
     });
 }
 
-fn draw_sidebar_rail(ui: &mut Ui, app: &mut App) {
+fn sidebar_panel_width(content_width: f32, include_gap: bool) -> f32 {
+    content_width
+        + if include_gap {
+            SIDEBAR_SECTION_GAP
+        } else {
+            0.0
+        }
+        + SIDEBAR_CARD_LEFT_MARGIN
+        + SIDEBAR_CARD_INNER_MARGIN * 2.0
+        + SIDEBAR_CARD_STROKE_WIDTH * 2.0
+}
+
+fn sidebar_card_style(ui: &Ui) -> (egui::Color32, egui::Stroke) {
+    let is_dark = ui.visuals().dark_mode;
+    (
+        if is_dark { OD_BG } else { OL_BG },
+        egui::Stroke::new(
+            SIDEBAR_CARD_STROKE_WIDTH,
+            if is_dark { OD_BG_HL } else { OL_BORDER },
+        ),
+    )
+}
+
+fn separator_stroke(ui: &Ui) -> egui::Stroke {
+    egui::Stroke::new(
+        1.0,
+        if ui.visuals().dark_mode {
+            OD_BG_HL
+        } else {
+            OL_BORDER
+        },
+    )
+}
+
+fn draw_sidebar_rail(ui: &mut Ui, app: &mut App, sidebar_open: bool) {
     ui.add_space(8.0);
 
-    let button = egui::Button::new(RichText::new("📱").size(14.0)).selected(app.sidebar_open);
+    let button = egui::Button::new(RichText::new("📱").size(14.0)).selected(sidebar_open);
 
     if ui
         .add_sized([SIDEBAR_RAIL_BUTTON_SIZE, SIDEBAR_RAIL_BUTTON_SIZE], button)

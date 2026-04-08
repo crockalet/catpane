@@ -16,8 +16,8 @@ Use this skill when you need Android logcat output from CatPane's MCP runtime. I
 
 ## Tool surface
 
-- `get_status` — inspect captures and optionally include connected devices
-- `list_devices` — list currently connected Android devices
+- `get_status` — inspect captures and optionally include all currently available capture devices
+- `list_devices` — list all currently available capture devices; focus on Android entries
 - `start_capture` — start buffering logcat for a device; use `package` or `pid` to scope
 - `get_logs` — read buffered logs with filters and cursor pagination
 - `clear_logs` — reset the buffered window for a capture without stopping it
@@ -36,6 +36,7 @@ Supporting docs:
    - Call `get_status` with `{"includeDevices": true}`.
    - If a suitable capture already exists and is `running`, reuse it.
    - If you only need device identifiers, `list_devices` is the lighter call.
+   - Both calls can include iOS simulators too, so filter to `platform: "Android"` for this skill.
 2. **Start capture only when needed.**
    - Call `start_capture` with `device` when multiple devices may be connected.
    - Use either `package` or `pid` to scope the capture to one app.

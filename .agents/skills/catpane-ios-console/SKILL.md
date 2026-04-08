@@ -16,8 +16,8 @@ Use this skill when you need iOS simulator console logs from CatPane's MCP runti
 
 ## Tool surface
 
-- `get_status` — inspect captures and optionally include booted simulators
-- `list_devices` — list currently booted iOS simulators
+- `get_status` — inspect captures and optionally include all currently available capture devices
+- `list_devices` — list all currently available capture devices; focus on iOS simulator entries
 - `start_capture` — start buffering console logs for a simulator
 - `get_logs` — read buffered logs with filters and cursor pagination
 - `clear_logs` — reset the buffered window for a capture without stopping it
@@ -36,6 +36,7 @@ Supporting docs:
    - Call `get_status` with `{"includeDevices": true}`.
    - If a suitable capture already exists and is `running`, reuse it.
    - If you only need device identifiers, `list_devices` is the lighter call.
+   - Both calls can include Android devices too, so filter to `platform: "iOS"` for this skill.
 2. **Start capture only when needed.**
    - Call `start_capture` with `device` when multiple simulators are booted.
    - Use `restart: true` only when replacing an existing capture on the same simulator.

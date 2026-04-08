@@ -7,9 +7,10 @@ TEMPLATE_PATH="${TEMPLATE_PATH:-$ROOT_DIR/packaging/homebrew/catpane.template.rb
 OUTPUT_PATH="${OUTPUT_PATH:-$DIST_DIR/homebrew/Casks/catpane.rb}"
 REPOSITORY="${REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+CLI_MANIFEST="${CLI_MANIFEST:-$ROOT_DIR/catpane-cli/Cargo.toml}"
 
 DEFAULT_VERSION="$(
-  "$PYTHON_BIN" - "$ROOT_DIR/Cargo.toml" <<'PY'
+  "$PYTHON_BIN" - "$CLI_MANIFEST" <<'PY'
 import pathlib
 import sys
 import tomllib

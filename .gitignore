@@ -4,5 +4,8 @@
 
 codedb.snapshot
 
-# Spike build artifacts (standalone Cargo workspaces)
-spikes/*/target/
+# Nested Cargo build artifacts
+**/target/
+
+# macOS Finder metadata
+.DS_Store

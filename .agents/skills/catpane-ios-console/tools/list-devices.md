@@ -1,6 +1,6 @@
 # `list_devices`
 
-Use `list_devices` when you need to discover booted iOS simulators before starting a capture, or when `get_status` was called without `includeDevices`.
+Use `list_devices` when you need to discover current capture-device identifiers before starting a capture, or when `get_status` was called without `includeDevices`.
 
 ## Arguments
 
@@ -18,5 +18,6 @@ Use `list_devices` when you need to discover booted iOS simulators before starti
 ## Operational notes
 
 - `list_devices` does not create a capture.
-- If no booted simulators are found, `start_capture` will fail. Boot a simulator first.
+- This shared tool can also return connected Android devices; ignore non-iOS entries for this skill.
+- If no iOS simulator entries are found, `start_capture` will fail. Boot a simulator first.
 - If you also need capture state, prefer `get_status` with `{"includeDevices": true}` so you can inspect both captures and simulators in one call.

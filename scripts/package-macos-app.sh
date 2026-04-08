@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+CLI_MANIFEST="${CLI_MANIFEST:-$ROOT_DIR/catpane-cli/Cargo.toml}"
 PROFILE="${PROFILE:-release}"
 TARGET_TRIPLE="${TARGET_TRIPLE:-}"
 APP_NAME="${APP_NAME:-CatPane}"
@@ -15,14 +16,21 @@ APPLE_NOTARY_ISSUER="${APPLE_NOTARY_ISSUER:-}"
 APPLE_NOTARY_KEY_PATH="${APPLE_NOTARY_KEY_PATH:-}"
 
 IFS=$'\t' read -r DEFAULT_BINARY_NAME DEFAULT_VERSION <<EOF
-$("$PYTHON_BIN" - "$ROOT_DIR/Cargo.toml" <<'PY'
+$("$PYTHON_BIN" - "$CLI_MANIFEST" <<'PY'
 import pathlib
 import sys
 import tomllib
 
 data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
 package = data["package"]
-print(f'{package["name"]}\t{package["version"]}')
+binary_name = package.get("default-run")
+if not binary_name:
+    bins = data.get("bin", [])
+    if bins:
+        binary_name = bins[0]["name"]
+    else:
+        binary_name = package["name"]
+print(f'{binary_name}\t{package["version"]}')
 PY
 )
 EOF
@@ -63,10 +71,10 @@ OUTPUT_DIR="$ARCHIVE_ROOT/macos/$ARCH"
 APP_DIR="$OUTPUT_DIR/${APP_NAME}.app"
 
 if [[ -n "$TARGET_TRIPLE" ]]; then
-  cargo build --profile "$PROFILE" --target "$TARGET_TRIPLE"
+  cargo build --profile "$PROFILE" --target "$TARGET_TRIPLE" -p catpane-cli
   BINARY_PATH="$ROOT_DIR/target/$TARGET_TRIPLE/$PROFILE/$BINARY_NAME"
 else
-  cargo build --profile "$PROFILE"
+  cargo build --profile "$PROFILE" -p catpane-cli
   BINARY_PATH="$ROOT_DIR/target/$PROFILE/$BINARY_NAME"
 fi
 

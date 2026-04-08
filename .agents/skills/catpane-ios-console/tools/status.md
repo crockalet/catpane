@@ -10,7 +10,7 @@ Use `get_status` as the default first call. It shows what captures exist, whethe
 {}
 ```
 
-### All captures plus booted simulators
+### All captures plus currently available devices
 
 ```json
 {
@@ -42,10 +42,12 @@ Use `get_status` as the default first call. It shows what captures exist, whethe
 - `captures[].buffer.len`, `captures[].buffer.capacity`, and `captures[].buffer.dropped`
 - `captures[].parsedEntries` and `captures[].parseErrors`
 - `devices[]` when `includeDevices` is `true`
+- `devices[].platform` — use `"iOS"` entries for this skill
 
 ## Operational notes
 
 - With no selector, `captures` includes every registered capture.
 - With `captureId` or `device`, `captures` is narrowed to that capture, but the top-level counts still describe the whole runtime.
+- `includeDevices` returns both connected Android devices and booted iOS simulators.
 - Use this before `start_capture` to avoid duplicate captures.
 - Use this before `get_logs` to learn the right `captureId` or `device` selector.
