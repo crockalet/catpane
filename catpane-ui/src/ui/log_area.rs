@@ -252,7 +252,9 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 }
 
                 let mut text_pos = row_rect.min + Vec2::new(4.0, 1.0);
-                let painter = ui.painter();
+                let painter = ui
+                    .painter()
+                    .with_clip_rect(row_rect.intersect(ui.clip_rect()));
 
                 let ts_galley = painter.layout_no_wrap(
                     entry.timestamp.clone(),
@@ -358,7 +360,7 @@ fn build_context_menu(
     pane_id: PaneId,
     fi: usize,
     filtered_indices: &[usize],
-    entries: &[crate::log_entry::LogEntry],
+    entries: &[catpane_core::log_entry::LogEntry],
     selection_anchor: &Option<usize>,
     selection_end: &Option<usize>,
     entry_tag: &str,

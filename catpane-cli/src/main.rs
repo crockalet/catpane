@@ -1,16 +1,16 @@
-mod adb;
-mod app;
-mod capture;
-mod filter;
-mod ios;
-mod log_buffer_config;
-mod log_entry;
-mod mcp;
-mod pane;
-mod ui;
+use std::{
+    collections::HashMap,
+    process::{Command, ExitCode, Stdio},
+    time::Duration,
+};
 
-use std::{ffi::OsStr, time::Duration};
-
+use catpane_core::{
+    capture::{self, ConnectedDevice},
+    ios,
+};
+use catpane_mcp::run_stdio_server;
+use catpane_ui::{App as UiApp, SplitDir, configure_fonts, draw_ui};
+use clap::{Parser, Subcommand};
 use muda::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
@@ -21,58 +21,81 @@ use objc2_app_kit::{NSView, NSWindowOcclusionState};
 #[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
-const VISIBLE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 const PID_REPOLL_INTERVAL: Duration = Duration::from_secs(5);
 const APP_NAME: &str = "CatPane";
+
+#[derive(Parser)]
+#[command(
+    name = "catpane",
+    bin_name = "catpane",
+    version,
+    about = "CatPane GUI and MCP CLI"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the MCP server over stdio.
+    Mcp,
+}
 
 /// Update `app.devices` and reconcile any pane whose saved serial is no longer
 /// present (e.g. an mDNS serial replaced by an IP:port serial after dedup).
 /// Matches by friendly name so the correct physical device is kept.
 fn update_devices(
-    app: &mut app::App,
-    new_devices: Vec<capture::ConnectedDevice>,
-    rt: &tokio::runtime::Handle,
+    app: &mut UiApp,
+    new_devices: Vec<ConnectedDevice>,
+    _rt: &tokio::runtime::Handle,
 ) {
-    let new_by_name: std::collections::HashMap<String, String> = new_devices
+    let new_by_name: HashMap<String, String> = new_devices
         .iter()
-        .map(|d| (format!("{}::{}", d.platform.label(), d.name), d.id.clone()))
+        .map(|device| {
+            (
+                format!("{}::{}", device.platform.label(), device.name),
+                device.id.clone(),
+            )
+        })
         .collect();
 
     let old_devices = std::mem::replace(&mut app.devices, new_devices);
 
     let pane_ids: Vec<_> = app.panes.keys().copied().collect();
-    for pid in pane_ids {
-        let device_id = match app.panes.get(&pid).and_then(|p| p.device.clone()) {
-            Some(id) => id,
+    for pane_id in pane_ids {
+        let device_id = match app.panes.get(&pane_id).and_then(|pane| pane.device.clone()) {
+            Some(device_id) => device_id,
             None => continue,
         };
-        if app.devices.iter().any(|d| d.id == device_id) {
-            let was_present_before = old_devices.iter().any(|d| d.id == device_id);
+
+        if app.devices.iter().any(|device| device.id == device_id) {
+            let was_present_before = old_devices.iter().any(|device| device.id == device_id);
             if was_present_before {
                 continue;
             }
-            if let Some(pane) = app.panes.get_mut(&pid) {
-                pane.stop_capture();
-                pane.start_capture(rt, &app.devices);
-            }
+            app.ensure_pane_capture(pane_id);
             continue;
         }
-        let reconnect_key = match old_devices.iter().find(|d| d.id == device_id) {
+
+        let reconnect_key = match old_devices.iter().find(|device| device.id == device_id) {
             Some(device) => format!("{}::{}", device.platform.label(), device.name),
             None => continue,
         };
+
         if let Some(new_id) = new_by_name.get(&reconnect_key) {
-            if let Some(pane) = app.panes.get_mut(&pid) {
+            if let Some(pane) = app.panes.get_mut(&pane_id) {
                 pane.device = Some(new_id.clone());
-                pane.stop_capture();
-                pane.start_capture(rt, &app.devices);
             }
+            app.ensure_pane_capture(pane_id);
         }
     }
 }
 
 struct CatPaneApp {
-    app: app::App,
+    app: UiApp,
     rt_handle: tokio::runtime::Handle,
     _rt: tokio::runtime::Runtime,
     _menu: Menu,
@@ -84,16 +107,14 @@ struct CatPaneApp {
 impl eframe::App for CatPaneApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !self.fonts_configured {
-            ui::configure_fonts(ctx, self.is_dark);
+            configure_fonts(ctx, self.is_dark);
             self.fonts_configured = true;
         }
 
-        // Handle native menu events
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(ctx, &event);
         }
 
-        // If copy was requested via native menu (Cmd+C), inject Copy event so TextEdits can handle it
         if self.copy_requested {
             ctx.input_mut(|input| {
                 input.events.push(egui::Event::Copy);
@@ -127,23 +148,24 @@ impl eframe::App for CatPaneApp {
             } else {
                 None
             };
+
             if let Some(result) = boot_result {
                 self.app.ios_simulator_boot_rx = None;
                 self.app.ios_simulator_booting_udid = None;
                 match result {
-                    Ok(msg) => {
-                        self.app.ios_simulator_status = Some((true, msg));
+                    Ok(message) => {
+                        self.app.ios_simulator_status = Some((true, message));
                         self.app.ios_simulator_refresh_pending = true;
                         self.app.device_refresh_pending = true;
                     }
-                    Err(msg) => {
-                        self.app.ios_simulator_status = Some((false, msg));
+                    Err(message) => {
+                        self.app.ios_simulator_status = Some((false, message));
                         self.app.ios_simulator_refresh_pending = true;
                     }
                 }
             }
 
-            let mut tracker_devices: Option<Vec<capture::ConnectedDevice>> = None;
+            let mut tracker_devices: Option<Vec<ConnectedDevice>> = None;
             if let Some(tracker) = &mut self.app.device_tracker {
                 while let Ok(devices) = tracker.try_recv() {
                     tracker_devices = Some(devices);
@@ -153,78 +175,76 @@ impl eframe::App for CatPaneApp {
                 update_devices(&mut self.app, devices, &self.rt_handle);
             }
 
-            // Auto-restart capture for panes whose stream died but whose
-            // selected device is still available.
             {
                 let pane_ids: Vec<_> = self.app.panes.keys().copied().collect();
-                for pid in pane_ids {
-                    let should_restart = self.app.panes.get(&pid).is_some_and(|p| {
-                        p.capture_handle.is_none()
-                            && !p.paused
-                            && p.last_capture_restart.elapsed() >= std::time::Duration::from_secs(3)
-                            && p.device.as_ref().is_some_and(|device_id| {
-                                self.app.devices.iter().any(|d| &d.id == device_id)
+                for pane_id in pane_ids {
+                    let should_restart = self.app.panes.get(&pane_id).is_some_and(|pane| {
+                        pane.capture_rx.is_none()
+                            && !pane.paused
+                            && pane.last_capture_restart.elapsed()
+                                >= std::time::Duration::from_secs(3)
+                            && pane.device.as_ref().is_some_and(|device_id| {
+                                self.app
+                                    .devices
+                                    .iter()
+                                    .any(|device| &device.id == device_id)
                             })
                     });
                     if should_restart {
-                        if let Some(pane) = self.app.panes.get_mut(&pid) {
-                            pane.start_capture(&self.rt_handle, &self.app.devices);
-                        }
+                        self.app.ensure_pane_capture(pane_id);
                     }
                 }
             }
 
-            // Per-pane package refresh
             let pane_ids: Vec<_> = self.app.panes.keys().copied().collect();
-            for pid in pane_ids {
+            for pane_id in pane_ids {
                 let needs_refresh = self
                     .app
                     .panes
-                    .get(&pid)
-                    .is_some_and(|p| p.package_refresh_pending);
+                    .get(&pane_id)
+                    .is_some_and(|pane| pane.package_refresh_pending);
                 if !needs_refresh {
                     continue;
                 }
 
-                let (device_id, pkg_name) = {
-                    let pane = self.app.panes.get(&pid).unwrap();
+                let (device_id, package_name) = {
+                    let pane = self.app.panes.get(&pane_id).unwrap();
                     (pane.device.clone(), pane.filter.package.clone())
                 };
 
-                if let Some(pane) = self.app.panes.get_mut(&pid) {
+                if let Some(pane) = self.app.panes.get_mut(&pane_id) {
                     pane.package_refresh_pending = false;
                     pane.last_pid_poll = std::time::Instant::now();
                 }
 
-                if let Some(device) = device_id {
+                if let Some(device_id) = device_id {
                     let packages = self
                         .rt_handle
-                        .block_on(capture::list_packages(&device, &self.app.devices));
-                    if let Some(pane) = self.app.panes.get_mut(&pid) {
+                        .block_on(capture::list_packages(&device_id, &self.app.devices));
+                    if let Some(pane) = self.app.panes.get_mut(&pane_id) {
                         pane.packages = packages;
                     }
-                    if let Some(pkg) = pkg_name {
-                        let pid_val = self.rt_handle.block_on(capture::get_pid_for_package(
-                            &device,
-                            &pkg,
+                    if let Some(package_name) = package_name {
+                        let pid_value = self.rt_handle.block_on(capture::get_pid_for_package(
+                            &device_id,
+                            &package_name,
                             &self.app.devices,
                         ));
-                        if let Some(pane) = self.app.panes.get_mut(&pid) {
-                            pane.pid_filter = pid_val;
+                        if let Some(pane) = self.app.panes.get_mut(&pane_id) {
+                            pane.pid_filter = pid_value;
                             pane.rebuild_filtered();
                         }
                     }
                 }
             }
 
-            // Periodic PID re-poll: detect when a filtered package has restarted
             let pane_ids: Vec<_> = self.app.panes.keys().copied().collect();
-            for pid in pane_ids {
-                let should_repoll = self.app.panes.get(&pid).is_some_and(|p| {
-                    p.filter.package.is_some()
-                        && !p.package_refresh_pending
-                        && p.last_pid_poll.elapsed() >= PID_REPOLL_INTERVAL
-                        && p.device.as_ref().is_some_and(|device_id| {
+            for pane_id in pane_ids {
+                let should_repoll = self.app.panes.get(&pane_id).is_some_and(|pane| {
+                    pane.filter.package.is_some()
+                        && !pane.package_refresh_pending
+                        && pane.last_pid_poll.elapsed() >= PID_REPOLL_INTERVAL
+                        && pane.device.as_ref().is_some_and(|device_id| {
                             self.app.devices.iter().any(|device| {
                                 device.id == *device_id && device.supports_package_filter()
                             })
@@ -234,22 +254,22 @@ impl eframe::App for CatPaneApp {
                     continue;
                 }
 
-                let (device_id, pkg_name) = {
-                    let pane = self.app.panes.get(&pid).unwrap();
+                let (device_id, package_name) = {
+                    let pane = self.app.panes.get(&pane_id).unwrap();
                     (pane.device.clone(), pane.filter.package.clone())
                 };
 
-                if let Some(pane) = self.app.panes.get_mut(&pid) {
+                if let Some(pane) = self.app.panes.get_mut(&pane_id) {
                     pane.last_pid_poll = std::time::Instant::now();
                 }
 
-                if let (Some(device), Some(pkg)) = (device_id, pkg_name) {
+                if let (Some(device_id), Some(package_name)) = (device_id, package_name) {
                     let new_pid = self.rt_handle.block_on(capture::get_pid_for_package(
-                        &device,
-                        &pkg,
+                        &device_id,
+                        &package_name,
                         &self.app.devices,
                     ));
-                    if let Some(pane) = self.app.panes.get_mut(&pid) {
+                    if let Some(pane) = self.app.panes.get_mut(&pane_id) {
                         if pane.pid_filter != new_pid {
                             pane.pid_filter = new_pid;
                             pane.rebuild_filtered();
@@ -259,32 +279,36 @@ impl eframe::App for CatPaneApp {
             }
         }
 
-        ui::draw_ui(ctx, &mut self.app);
+        draw_ui(ctx, &mut self.app);
 
         if window_visible {
-            ctx.request_repaint_after(VISIBLE_REPAINT_INTERVAL);
+            let repaint_interval = if self.app.needs_live_repaint() {
+                ACTIVE_REPAINT_INTERVAL
+            } else {
+                IDLE_REPAINT_INTERVAL
+            };
+            ctx.request_repaint_after(repaint_interval);
         }
 
-        // After render: if Cmd+C was requested and no TextEdit handled it, copy selected log rows
         if self.copy_requested {
             self.copy_requested = false;
             #[allow(deprecated)]
-            let nothing_copied = ctx.output(|o| o.copied_text.is_empty());
+            let nothing_copied = ctx.output(|output| output.copied_text.is_empty());
             if nothing_copied {
                 if let Some(pane) = self.app.panes.get(&self.app.focused_pane) {
                     if let Some((lo, hi)) = pane.selected_range() {
                         let lines: Vec<String> = (lo..=hi)
-                            .filter_map(|fi| {
+                            .filter_map(|filtered_index| {
                                 pane.filtered_indices
-                                    .get(fi)
-                                    .and_then(|&ei| pane.entries.get(ei))
-                                    .map(|e| {
+                                    .get(filtered_index)
+                                    .and_then(|&entry_index| pane.entries.get(entry_index))
+                                    .map(|entry| {
                                         format!(
                                             "{} {} {} {}",
-                                            e.timestamp,
-                                            e.level.as_char(),
-                                            e.tag,
-                                            e.message
+                                            entry.timestamp,
+                                            entry.level.as_char(),
+                                            entry.tag,
+                                            entry.message
                                         )
                                     })
                             })
@@ -333,7 +357,6 @@ fn window_is_visible_on_macos(frame: &eframe::Frame) -> bool {
         return true;
     };
 
-    // eframe gives us the backing NSView; the view/window stay owned by AppKit.
     let Some(ns_view) = (unsafe { handle.ns_view.as_ptr().cast::<NSView>().as_ref() }) else {
         return true;
     };
@@ -367,9 +390,9 @@ impl CatPaneApp {
                 }
             }
         } else if *id == muda::MenuId::from("split_right") {
-            self.app.split_pane(pane::SplitDir::Vertical);
+            self.app.split_pane(SplitDir::Vertical);
         } else if *id == muda::MenuId::from("split_down") {
-            self.app.split_pane(pane::SplitDir::Horizontal);
+            self.app.split_pane(SplitDir::Horizontal);
         } else if *id == muda::MenuId::from("close_pane") {
             if self.app.pane_tree.count() > 1 {
                 let pane_id = self.app.focused_pane;
@@ -389,13 +412,6 @@ impl CatPaneApp {
             }
         } else if *id == muda::MenuId::from("show_help") {
             self.app.show_help = !self.app.show_help;
-        } else if *id == muda::MenuId::from("wireless_debug") {
-            self.app.show_wireless_dialog = !self.app.show_wireless_dialog;
-        } else if *id == muda::MenuId::from("boot_ios_simulator") {
-            self.app.show_ios_simulator_dialog = !self.app.show_ios_simulator_dialog;
-            if self.app.show_ios_simulator_dialog {
-                self.app.ios_simulator_refresh_pending = true;
-            }
         }
     }
 }
@@ -403,7 +419,6 @@ impl CatPaneApp {
 fn setup_menu() -> Menu {
     let menu = Menu::new();
 
-    // macOS App menu
     let app_menu = Submenu::with_items(
         "CatPane",
         true,
@@ -430,17 +445,12 @@ fn setup_menu() -> Menu {
     let file_menu = Submenu::with_items(
         "File",
         true,
-        &[
-            &MenuItem::with_id(
-                "new_window",
-                "New Window",
-                true,
-                Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyN)),
-            ),
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("wireless_debug", "Wireless Debug…", true, None),
-            &MenuItem::with_id("boot_ios_simulator", "Boot iOS Simulator…", true, None),
-        ],
+        &[&MenuItem::with_id(
+            "new_window",
+            "New Window",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyN)),
+        )],
     )
     .unwrap();
 
@@ -537,11 +547,11 @@ fn setup_menu() -> Menu {
 fn is_system_dark_mode() -> bool {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("defaults")
+        Command::new("defaults")
             .args(["read", "-g", "AppleInterfaceStyle"])
             .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
                     .trim()
                     .eq_ignore_ascii_case("dark")
             })
@@ -553,53 +563,37 @@ fn is_system_dark_mode() -> bool {
     }
 }
 
-fn should_run_mcp_stdio() -> bool {
-    matches!(
-        std::env::args_os().nth(1).as_deref(),
-        Some(arg) if arg == OsStr::new("mcp")
-    )
-}
-
 fn run_mcp_mode() -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|err| format!("Failed to create tokio runtime: {err}"))?;
-    let rt_handle = rt.handle().clone();
-    rt.block_on(mcp::run_stdio_server(rt_handle))
+        .map_err(|err| format!("Failed to create Tokio runtime: {err}"))?;
+    let runtime_handle = runtime.handle().clone();
+    runtime.block_on(run_stdio_server(runtime_handle))
 }
 
-fn main() -> eframe::Result<()> {
-    if should_run_mcp_stdio() {
-        if let Err(err) = run_mcp_mode() {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-
-    // Auto-fork: re-launch as a detached process unless already forked
+fn run_gui_mode() -> Result<(), String> {
     if std::env::var("CATPANE_FORKED").is_err() {
-        use std::process::Command;
-        let exe = std::env::current_exe().expect("Failed to get executable path");
-        Command::new(&exe)
+        let executable = std::env::current_exe()
+            .map_err(|err| format!("Failed to get executable path: {err}"))?;
+        Command::new(&executable)
             .args(std::env::args_os().skip(1))
             .env("CATPANE_FORKED", "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
-            .expect("Failed to fork process");
+            .map_err(|err| format!("Failed to fork process: {err}"))?;
         return Ok(());
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Failed to create tokio runtime");
+        .map_err(|err| format!("Failed to create Tokio runtime: {err}"))?;
 
-    let devices = rt.block_on(capture::list_devices());
-    let rt_handle = rt.handle().clone();
+    let devices = runtime.block_on(capture::list_devices());
+    let runtime_handle = runtime.handle().clone();
     let is_dark = is_system_dark_mode();
     let menu = setup_menu();
 
@@ -618,9 +612,9 @@ fn main() -> eframe::Result<()> {
             menu.init_for_nsapp();
 
             Ok(Box::new(CatPaneApp {
-                app: app::App::new(rt_handle.clone(), devices),
-                rt_handle,
-                _rt: rt,
+                app: UiApp::new(runtime_handle.clone(), devices),
+                rt_handle: runtime_handle,
+                _rt: runtime,
                 _menu: menu,
                 fonts_configured: false,
                 is_dark,
@@ -628,4 +622,20 @@ fn main() -> eframe::Result<()> {
             }))
         }),
     )
+    .map_err(|err| err.to_string())
+}
+
+fn main() -> ExitCode {
+    let result = match Cli::parse().command {
+        Some(Commands::Mcp) => run_mcp_mode(),
+        None => run_gui_mode(),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
 }

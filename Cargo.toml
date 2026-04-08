@@ -1,27 +1,12 @@
 [workspace]
-members = ["catpane-core"]
-exclude = ["spikes/gpui-poc"]
-
-[package]
-name = "catpane"
-version = "0.2.3"
-edition = "2024"
-
-[dependencies]
-catpane-core = { path = "catpane-core", features = ["egui"] }
-eframe = "0.31"
-egui = "0.31"
-tokio = { version = "1", features = ["full"] }
-regex = "1"
-muda = "0.17"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-qrcode = "0.14"
-mdns-sd = "0.12"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.2.2", features = ["NSView", "NSWindow"] }
-raw-window-handle = "0.6"
+resolver = "3"
+members = [
+    "catpane-cli",
+    "catpane-core",
+    "catpane-mcp",
+    "catpane-ui",
+]
+default-members = ["catpane-cli"]
 
 [profile.release]
 opt-level = 3

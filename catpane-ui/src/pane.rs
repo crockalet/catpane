@@ -1,7 +1,7 @@
-use crate::capture::{self, CaptureHandle, ConnectedDevice};
-use crate::filter::Filter;
-use crate::log_buffer_config::log_buffer_capacity;
-use crate::log_entry::LogEntry;
+use catpane_core::filter::Filter;
+use catpane_core::log_buffer_config::log_buffer_capacity;
+use catpane_core::log_entry::LogEntry;
+use tokio::sync::broadcast;
 
 const COMPACT_BATCH_DIVISOR: usize = 50;
 const MIN_COMPACT_BATCH_SIZE: usize = 250;
@@ -12,6 +12,10 @@ static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 fn next_pane_id() -> PaneId {
     NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn default_word_wrap() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +130,8 @@ pub struct Pane {
     pub scroll_to_bottom: bool,
     pub auto_scroll: bool,
     pub paused: bool,
-    pub capture_handle: Option<CaptureHandle>,
+    pub capture_rx: Option<broadcast::Receiver<LogEntry>>,
+    pub capture_device_id: Option<String>,
     pub pid_filter: Option<u32>,
     // Search
     pub search_open: bool,
@@ -191,7 +196,8 @@ impl Pane {
             scroll_to_bottom: true,
             auto_scroll: true,
             paused: false,
-            capture_handle: None,
+            capture_rx: None,
+            capture_device_id: None,
             pid_filter: None,
             search_open: false,
             search_input: String::new(),
@@ -213,7 +219,7 @@ impl Pane {
             packages: Vec::new(),
             package_refresh_pending: false,
             last_pid_poll: std::time::Instant::now(),
-            word_wrap: false,
+            word_wrap: default_word_wrap(),
             scroll_offset_y: 0.0,
             last_capture_restart: std::time::Instant::now(),
         }
@@ -221,17 +227,17 @@ impl Pane {
 
     pub fn ingest_lines(&mut self) {
         if self.paused {
-            if let Some(ref mut handle) = self.capture_handle {
-                while handle.rx.try_recv().is_ok() {}
+            if let Some(ref mut rx) = self.capture_rx {
+                while rx.try_recv().is_ok() {}
             }
             return;
         }
 
         let mut added = false;
         let mut channel_dead = false;
-        if let Some(ref mut handle) = self.capture_handle {
+        if let Some(ref mut rx) = self.capture_rx {
             for _ in 0..500 {
-                match handle.rx.try_recv() {
+                match rx.try_recv() {
                     Ok(entry) => {
                         if !self.seen_tags.contains(&entry.tag) {
                             self.seen_tags.push(entry.tag.clone());
@@ -244,11 +250,12 @@ impl Pane {
                             added = true;
                         }
                     }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(broadcast::error::TryRecvError::Closed) => {
                         channel_dead = true;
                         break;
                     }
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
                 }
             }
         }
@@ -256,7 +263,7 @@ impl Pane {
         // Capture process exited — drop the dead handle so the update loop
         // can detect this and restart when the device is available.
         if channel_dead {
-            self.capture_handle = None;
+            self.capture_rx = None;
         }
 
         if added && self.auto_scroll {
@@ -349,21 +356,16 @@ impl Pane {
         self.rebuild_filtered();
     }
 
-    pub fn start_capture(&mut self, rt: &tokio::runtime::Handle, devices: &[ConnectedDevice]) {
+    pub fn start_capture(&mut self, device_id: String, capture_rx: broadcast::Receiver<LogEntry>) {
         self.stop_capture();
-        if let Some(device_id) = self.device.as_ref() {
-            if let Some(device) = devices.iter().find(|device| &device.id == device_id) {
-                self.capture_handle = Some(capture::spawn_capture(rt, device, self.pid_filter));
-                self.last_capture_restart = std::time::Instant::now();
-            }
-        }
+        self.capture_device_id = Some(device_id);
+        self.capture_rx = Some(capture_rx);
+        self.last_capture_restart = std::time::Instant::now();
     }
 
     pub fn stop_capture(&mut self) {
-        if let Some(ref handle) = self.capture_handle {
-            handle.stop();
-        }
-        self.capture_handle = None;
+        self.capture_rx = None;
+        self.capture_device_id = None;
     }
 }
 
@@ -389,7 +391,7 @@ fn compact_batch_size(capacity: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_entry::{LogLevel, LogPlatform};
+    use catpane_core::log_entry::{LogLevel, LogPlatform};
 
     fn entry(tag: &str, message: &str) -> LogEntry {
         LogEntry {

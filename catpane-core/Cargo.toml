@@ -8,10 +8,10 @@ default = []
 egui = ["dep:egui", "dep:qrcode"]
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+egui = { version = "0.31", optional = true }
+mdns-sd = "0.12"
+qrcode = { version = "0.14", optional = true }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-mdns-sd = "0.12"
-egui = { version = "0.31", optional = true }
-qrcode = { version = "0.14", optional = true }
+tokio = { version = "1", features = ["full"] }

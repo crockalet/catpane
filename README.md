@@ -51,9 +51,22 @@ Install `android-platform-tools` if you want Android capture. iOS simulator capt
 ```sh
 cargo run
 # or for a release build:
-cargo build --release
+cargo build --release -p catpane-cli
 ./target/release/catpane
 ```
+
+The workspace is split into `catpane-core`, `catpane-ui`, `catpane-cli`, and `catpane-mcp`. The `catpane-cli` crate owns the user-facing `catpane` binary.
+
+If you use [`just`](https://github.com/casey/just), the repo includes a `justfile` with handy dev commands:
+
+```sh
+just run
+just run-release
+just rerun
+just rerun-release
+```
+
+`rerun` and `rerun-release` clean only the `catpane-*` workspace crates before rebuilding, while keeping cached artifacts for unrelated dependencies.
 
 ## MCP Server
 
@@ -66,7 +79,7 @@ catpane mcp
 If you are running from source during development:
 
 ```sh
-cargo run -- mcp
+cargo run -p catpane-cli -- mcp
 ```
 
 Android captures require `adb` in your `PATH` at runtime. iOS simulator captures require Apple simulator tooling via `xcrun`.
@@ -139,7 +152,9 @@ Session and tag history are saved to:
 - `~/.config/catpane/session.json` — pane layout, filters, device selection
 - `~/.config/catpane/tag_history.txt` — recent tag filter expressions
 
-Set `CATPANE_LOG_BUFFER_CAPACITY` to override the default in-memory per-pane log retention (`50_000`). Android captures also use the same value to start from only the latest buffered lines before following live logs.
+Set `CATPANE_LOG_BUFFER_CAPACITY` to override the default in-memory per-pane log retention (`50_000`).
+
+Set `CATPANE_INITIAL_LOG_BACKLOG` to override how many recent Android logcat lines CatPane loads before switching to live streaming. The default is `2_000`, and it is capped at the in-memory buffer capacity.
 
 ## License
 

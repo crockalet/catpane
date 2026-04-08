@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
-use crate::{
+use catpane_core::{
     capture::{self, ConnectedDevice, DevicePlatform},
     log_buffer_config::DEFAULT_LOG_BUFFER_CAPACITY,
     log_entry::LogLevel,
 };
 
-use super::{
+use crate::{
     log_buffer::{
         BufferedLogEntry, LogBuffer, LogBufferMeta, LogPage, LogPageMeta, LogQuery, PageOrder,
     },
@@ -1006,7 +1006,7 @@ impl CaptureShared {
         }
     }
 
-    fn append_entry(&self, entry: crate::log_entry::LogEntry) {
+    fn append_entry(&self, entry: catpane_core::log_entry::LogEntry) {
         {
             let mut buffer = lock_recover(&self.buffer);
             buffer.append(entry);
