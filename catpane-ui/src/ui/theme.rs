@@ -7,6 +7,7 @@ pub const LOG_ROW_HEIGHT: f32 = 18.0;
 pub const OD_BG: Color32 = Color32::from_rgb(40, 44, 52);
 pub const OD_BG_LIGHT: Color32 = Color32::from_rgb(44, 49, 58);
 pub const OD_BG_HL: Color32 = Color32::from_rgb(62, 68, 81);
+pub const OD_BG_BACKDROP: Color32 = Color32::from_rgb(30, 34, 42);
 pub const OD_FG: Color32 = Color32::from_rgb(171, 178, 191);
 pub const OD_FG_DIM: Color32 = Color32::from_rgb(92, 99, 112);
 pub const OD_BLUE: Color32 = Color32::from_rgb(97, 175, 239);
@@ -22,6 +23,7 @@ pub const OD_PURPLE: Color32 = Color32::from_rgb(198, 120, 221);
 pub const OL_BG: Color32 = Color32::from_rgb(250, 250, 250);
 pub const OL_BG_LIGHT: Color32 = Color32::from_rgb(240, 240, 240);
 pub const OL_BG_HL: Color32 = Color32::from_rgb(225, 225, 228);
+pub const OL_BG_BACKDROP: Color32 = Color32::from_rgb(232, 235, 240);
 pub const OL_FG: Color32 = Color32::from_rgb(56, 58, 66);
 pub const OL_FG_DIM: Color32 = Color32::from_rgb(120, 125, 137);
 pub const OL_BLUE: Color32 = Color32::from_rgb(64, 120, 242);
@@ -34,13 +36,16 @@ pub fn configure_fonts(ctx: &egui::Context, is_dark: bool) {
     fonts.font_data.insert(
         "JetBrainsMono".to_owned(),
         FontData::from_static(include_bytes!(
-            "../../assets/fonts/JetBrainsMono-Regular.ttf"
+            "../../../assets/fonts/JetBrainsMono-Regular.ttf"
         ))
         .into(),
     );
     fonts.font_data.insert(
         "JetBrainsMono-Bold".to_owned(),
-        FontData::from_static(include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf")).into(),
+        FontData::from_static(include_bytes!(
+            "../../../assets/fonts/JetBrainsMono-Bold.ttf"
+        ))
+        .into(),
     );
     fonts
         .families

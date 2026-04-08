@@ -4,14 +4,14 @@ use tokio::io::{
     self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
 };
 
-use super::protocol::{
+use crate::protocol::{
     CallToolParams, EmptyParams, EmptyResult, INTERNAL_ERROR, ImplementationInfo, InitializeParams,
     InitializeResult, JSONRPC_VERSION, JsonRpcErrorResponse, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, ListToolsParams, ListToolsResult, METHOD_INITIALIZE, METHOD_PING,
     METHOD_TOOLS_CALL, METHOD_TOOLS_LIST, NOTIFICATION_INITIALIZED, RequestId, ServerCapabilities,
     Tool,
 };
-use super::tools::{McpRuntimeState, handle_tool_call, tool_definitions};
+use crate::tools::{McpRuntimeState, handle_tool_call, tool_definitions};
 
 pub async fn run_stdio_server(rt: tokio::runtime::Handle) -> Result<(), String> {
     let stdin = BufReader::new(io::stdin());
@@ -380,7 +380,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::mcp::protocol::{
+    use crate::protocol::{
         InitializeResponse, MCP_PROTOCOL_VERSION_2024_11_05, MCP_PROTOCOL_VERSION_2025_11_25,
     };
 

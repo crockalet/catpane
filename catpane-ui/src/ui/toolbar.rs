@@ -2,12 +2,13 @@ use egui::{self, Key, RichText, ScrollArea, Ui};
 
 use super::theme::*;
 use crate::app::App;
-use crate::log_entry::LogLevel;
 use crate::pane::PaneId;
+use catpane_core::log_entry::LogLevel;
 
 pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
     let is_dark = ui.visuals().dark_mode;
     let toolbar_bg = if is_dark { OD_BG_LIGHT } else { OL_BG_LIGHT };
+    let mut pending_device_selection: Option<String> = None;
 
     let toolbar_frame = egui::Frame::new()
         .fill(toolbar_bg)
@@ -17,11 +18,6 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
     toolbar_frame.show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-
-            let has_android_devices = app
-                .devices
-                .iter()
-                .any(|device| device.supports_wireless_debugging());
 
             let pane = match app.panes.get_mut(&pane_id) {
                 Some(p) => p,
@@ -56,20 +52,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                             .selectable_label(is_selected, device.display_name())
                             .clicked()
                         {
-                            pane.stop_capture();
-                            pane.clear();
-                            pane.device = Some(device.id.clone());
-                            pane.pid_filter = None;
-                            pane.filter.package = None;
-                            pane.filter.ios_process = None;
-                            pane.filter.ios_subsystem = None;
-                            pane.filter.ios_category = None;
-                            pane.packages.clear();
-                            pane.package_filter_text.clear();
-                            pane.ios_process_filter_text.clear();
-                            pane.ios_subsystem_filter_text.clear();
-                            pane.ios_category_filter_text.clear();
-                            pane.start_capture(&app.rt, &app.devices);
+                            pending_device_selection = Some(device.id.clone());
                         }
                     }
                     ui.separator();
@@ -77,26 +60,6 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                         app.device_refresh_pending = true;
                     }
                 });
-
-            if has_android_devices {
-                if ui
-                    .add(egui::Button::new(RichText::new("📡").size(14.0)))
-                    .on_hover_text("Wireless debugging")
-                    .clicked()
-                {
-                    app.show_wireless_dialog = true;
-                }
-            }
-
-            #[cfg(target_os = "macos")]
-            if ui
-                .add(egui::Button::new(RichText::new("🍎").size(14.0)))
-                .on_hover_text("Boot iOS Simulator")
-                .clicked()
-            {
-                app.show_ios_simulator_dialog = true;
-                app.ios_simulator_refresh_pending = true;
-            }
 
             ui.separator();
 
@@ -379,6 +342,10 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             }
         });
     });
+
+    if let Some(device_id) = pending_device_selection {
+        app.set_pane_device(pane_id, Some(device_id));
+    }
 }
 
 pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {

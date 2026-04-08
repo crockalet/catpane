@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     adb, ios,
-    log_buffer_config::log_buffer_capacity,
+    log_buffer_config::initial_log_backlog,
     log_entry::{LogEntry, LogPlatform, parse_ios_log_ndjson_line, parse_logcat_line},
 };
 
@@ -88,8 +88,8 @@ impl CaptureController {
         wait_for_completion(self.completion_rx.clone()).await;
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_controller() -> (Self, mpsc::Receiver<()>, watch::Sender<bool>) {
+    #[doc(hidden)]
+    pub fn test_controller() -> (Self, mpsc::Receiver<()>, watch::Sender<bool>) {
         let (kill_tx, kill_rx) = mpsc::channel(1);
         let (completion_tx, completion_rx) = watch::channel(false);
         (
@@ -170,14 +170,17 @@ pub async fn list_devices() -> Vec<ConnectedDevice> {
         })
         .collect();
 
-    devices.extend(ios::list_booted_simulators().await.into_iter().map(|sim| {
-        ConnectedDevice {
-            id: sim.udid,
-            name: sim.name,
-            description: sim.runtime,
-            platform: DevicePlatform::IosSimulator,
-        }
-    }));
+    devices.extend(
+        ios::list_booted_simulators()
+            .await
+            .into_iter()
+            .map(|sim| ConnectedDevice {
+                id: sim.udid,
+                name: sim.name,
+                description: sim.runtime,
+                platform: DevicePlatform::IosSimulator,
+            }),
+    );
 
     devices.sort_by(|left, right| {
         left.platform
@@ -289,7 +292,7 @@ fn spawn_android_capture(
             device_id,
             "logcat".to_string(),
             "-T".to_string(),
-            log_buffer_capacity().to_string(),
+            initial_log_backlog().to_string(),
             "-v".to_string(),
             "threadtime".to_string(),
         ];

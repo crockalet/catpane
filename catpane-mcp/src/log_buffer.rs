@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, error::Error, fmt, str::FromStr};
 
-use crate::{
+use catpane_core::{
     filter::Filter,
     log_entry::{LogEntry, LogLevel},
 };
@@ -441,7 +441,7 @@ fn parse_u16_component(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_entry::LogPlatform;
+    use catpane_core::log_entry::LogPlatform;
 
     fn entry(timestamp: &str, level: LogLevel, tag: &str, message: &str) -> LogEntry {
         LogEntry {
