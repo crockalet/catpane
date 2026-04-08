@@ -57,6 +57,17 @@ cargo build --release -p catpane-cli
 
 The workspace is split into `catpane-core`, `catpane-ui`, `catpane-cli`, and `catpane-mcp`. The `catpane-cli` crate owns the user-facing `catpane` binary.
 
+If you use [`just`](https://github.com/casey/just), the repo includes a `justfile` with handy dev commands:
+
+```sh
+just run
+just run-release
+just rerun
+just rerun-release
+```
+
+`rerun` and `rerun-release` clean only the `catpane-*` workspace crates before rebuilding, while keeping cached artifacts for unrelated dependencies.
+
 ## MCP Server
 
 CatPane can also run as a headless stdio MCP server:

@@ -477,6 +477,7 @@ pub fn qr_pairing_string(service_name: &str, password: &str) -> String {
 }
 
 /// Generate a QR code as an egui-compatible ColorImage.
+#[cfg(feature = "egui")]
 pub fn generate_qr_image(data: &str, scale: usize) -> egui::ColorImage {
     use qrcode::QrCode;
 

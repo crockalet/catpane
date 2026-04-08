@@ -58,6 +58,7 @@ impl LogLevel {
         }
     }
 
+    #[cfg(feature = "egui")]
     pub fn color(self) -> egui::Color32 {
         match self {
             Self::Verbose => egui::Color32::from_rgb(92, 99, 112),

@@ -7,7 +7,7 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-catpane-core = { path = "../catpane-core" }
+catpane-core = { path = "../catpane-core", features = ["egui"] }
 egui = "0.31"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
