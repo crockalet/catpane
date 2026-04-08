@@ -40,9 +40,11 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 
 ```sh
 brew tap crockalet/catpane
-brew install --cask crockalet/catpane/catpane
+brew install --cask --no-quarantine crockalet/catpane/catpane
 brew install --cask android-platform-tools
 ```
+
+Use `--no-quarantine` for now until CatPane is signed and notarized.
 
 Install `android-platform-tools` if you want Android capture. iOS simulator capture uses Apple tooling that ships with Xcode / Xcode Command Line Tools.
 
