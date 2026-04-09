@@ -165,7 +165,7 @@ impl eframe::App for CatPaneApp {
                 }
             }
 
-            let location_result = if let Some(rx) = &mut self.app.location_rx {
+            let location_result = if let Some((_, rx)) = &mut self.app.location_pending {
                 match rx.try_recv() {
                     Ok(result) => Some(result),
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
@@ -178,10 +178,21 @@ impl eframe::App for CatPaneApp {
             };
 
             if let Some(result) = location_result {
-                self.app.location_rx = None;
-                match result {
-                    Ok(message) => self.app.location_status = Some((true, message)),
-                    Err(message) => self.app.location_status = Some((false, message)),
+                let device_id = self
+                    .app
+                    .location_pending
+                    .take()
+                    .map(|(id, _)| id);
+                if let Some(device_id) = device_id {
+                    let state = self
+                        .app
+                        .device_locations
+                        .entry(device_id)
+                        .or_default();
+                    match result {
+                        Ok(message) => state.status = Some((true, message)),
+                        Err(message) => state.status = Some((false, message)),
+                    }
                 }
             }
 

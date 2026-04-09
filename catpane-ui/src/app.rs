@@ -9,6 +9,44 @@ use egui;
 
 const TAG_HISTORY_MAX: usize = 50;
 
+#[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum SidebarTab {
+    #[default]
+    Devices,
+    Location,
+    Crashes,
+    Watches,
+}
+
+pub struct DeviceLocationState {
+    pub lat: String,
+    pub lon: String,
+    pub preset: String,
+    pub status: Option<(bool, String)>,
+}
+
+impl Default for DeviceLocationState {
+    fn default() -> Self {
+        Self {
+            lat: String::new(),
+            lon: String::new(),
+            preset: "Custom".to_string(),
+            status: None,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SavedLocation {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+fn default_sidebar_tab() -> SidebarTab {
+    SidebarTab::Devices
+}
+
 struct SharedCapture {
     tx: broadcast::Sender<LogEntry>,
     controller: CaptureController,
@@ -69,6 +107,8 @@ struct Session {
     focused: usize,
     #[serde(default = "default_sidebar_open")]
     sidebar_open: bool,
+    #[serde(default = "default_sidebar_tab")]
+    sidebar_tab: SidebarTab,
 }
 
 pub struct App {
@@ -76,6 +116,7 @@ pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     pub focused_pane: PaneId,
     pub sidebar_open: bool,
+    pub sidebar_tab: SidebarTab,
     pub devices: Vec<ConnectedDevice>,
     pub rt: tokio::runtime::Handle,
     pub show_help: bool,
@@ -97,12 +138,14 @@ pub struct App {
     pub ios_simulator_status: Option<(bool, String)>,
     pub ios_simulator_booting_udid: Option<String>,
     pub ios_simulator_boot_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
-    // Location spoofing state
-    pub location_lat: String,
-    pub location_lon: String,
-    pub location_preset: String,
-    pub location_status: Option<(bool, String)>,
-    pub location_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
+    // Per-device location spoofing state
+    pub device_locations: HashMap<String, DeviceLocationState>,
+    pub saved_locations: Vec<SavedLocation>,
+    pub location_pending: Option<(String, tokio::sync::mpsc::Receiver<Result<String, String>>)>,
+    // Save location input
+    pub save_location_name: String,
+    // Expanded crash indices in sidebar (for collapsible detail view)
+    pub expanded_crashes: std::collections::HashSet<usize>,
 }
 
 impl App {
@@ -126,6 +169,7 @@ impl App {
             panes,
             focused_pane: id,
             sidebar_open: default_sidebar_open(),
+            sidebar_tab: SidebarTab::default(),
             devices,
             rt,
             show_help: false,
@@ -144,11 +188,11 @@ impl App {
             ios_simulator_status: None,
             ios_simulator_booting_udid: None,
             ios_simulator_boot_rx: None,
-            location_lat: String::new(),
-            location_lon: String::new(),
-            location_preset: "Custom".to_string(),
-            location_status: None,
-            location_rx: None,
+            device_locations: HashMap::new(),
+            saved_locations: Self::load_saved_locations(),
+            location_pending: None,
+            save_location_name: String::new(),
+            expanded_crashes: std::collections::HashSet::new(),
         };
         app.ensure_pane_capture(id);
         app
@@ -200,7 +244,7 @@ impl App {
             || self.ios_simulator_refresh_pending
             || self.ios_simulator_boot_rx.is_some()
             || self.ios_simulator_booting_udid.is_some()
-            || self.location_rx.is_some()
+            || self.location_pending.is_some()
         {
             return true;
         }
@@ -491,6 +535,33 @@ impl App {
         let _ = std::fs::write(&path, content);
     }
 
+    // --- Saved locations persistence ---
+
+    fn saved_locations_path() -> std::path::PathBuf {
+        let mut p = dirs_fallback();
+        p.push("catpane");
+        p.push("saved_locations.json");
+        p
+    }
+
+    fn load_saved_locations() -> Vec<SavedLocation> {
+        let path = Self::saved_locations_path();
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn persist_saved_locations(&self) {
+        let path = Self::saved_locations_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.saved_locations) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
     // --- Session persistence ---
 
     fn session_path() -> std::path::PathBuf {
@@ -534,6 +605,7 @@ impl App {
             tree,
             focused: focused_idx,
             sidebar_open: self.sidebar_open,
+            sidebar_tab: self.sidebar_tab,
         };
 
         let path = Self::session_path();
@@ -600,6 +672,7 @@ impl App {
             panes,
             focused_pane: focused,
             sidebar_open: session.sidebar_open,
+            sidebar_tab: session.sidebar_tab,
             devices: devices.to_vec(),
             rt: rt.clone(),
             show_help: false,
@@ -618,11 +691,11 @@ impl App {
             ios_simulator_status: None,
             ios_simulator_booting_udid: None,
             ios_simulator_boot_rx: None,
-            location_lat: String::new(),
-            location_lon: String::new(),
-            location_preset: "Custom".to_string(),
-            location_status: None,
-            location_rx: None,
+            device_locations: HashMap::new(),
+            saved_locations: Self::load_saved_locations(),
+            location_pending: None,
+            save_location_name: String::new(),
+            expanded_crashes: std::collections::HashSet::new(),
         };
 
         for pane_id in pane_ids {

@@ -1,8 +1,10 @@
 use egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 
 use super::theme::*;
-use crate::app::{App, QrPairStatus, QrPairingState};
+use crate::app::{App, DeviceLocationState, QrPairStatus, QrPairingState, SavedLocation, SidebarTab};
+use crate::pane::WATCH_COLORS;
 use catpane_core::capture::{ConnectedDevice, DevicePlatform};
+use catpane_core::crash_detector::CrashType;
 
 const SIDEBAR_CARD_LEFT_MARGIN: f32 = 4.0;
 const SIDEBAR_CARD_VERTICAL_MARGIN: f32 = 4.0;
@@ -157,14 +159,31 @@ fn separator_stroke(ui: &Ui) -> egui::Stroke {
 fn draw_sidebar_rail(ui: &mut Ui, app: &mut App, sidebar_open: bool) {
     ui.add_space(8.0);
 
-    let button = egui::Button::new(RichText::new("📱").size(14.0)).selected(sidebar_open);
+    let tabs: &[(SidebarTab, &str, &str)] = &[
+        (SidebarTab::Devices, "📱", "Devices"),
+        (SidebarTab::Location, "📍", "Location"),
+        (SidebarTab::Crashes, "🔴", "Crashes"),
+        (SidebarTab::Watches, "👁", "Watches"),
+    ];
 
-    if ui
-        .add_sized([SIDEBAR_RAIL_BUTTON_SIZE, SIDEBAR_RAIL_BUTTON_SIZE], button)
-        .on_hover_text("Open device manager")
-        .clicked()
-    {
-        app.sidebar_open = true;
+    for &(tab, icon, tooltip) in tabs {
+        let is_active = sidebar_open && app.sidebar_tab == tab;
+        let button = egui::Button::new(RichText::new(icon).size(14.0)).selected(is_active);
+        let response = ui
+            .add_sized([SIDEBAR_RAIL_BUTTON_SIZE, SIDEBAR_RAIL_BUTTON_SIZE], button)
+            .on_hover_text(tooltip);
+
+        if response.clicked() {
+            if !sidebar_open {
+                app.sidebar_open = true;
+                app.sidebar_tab = tab;
+            } else if app.sidebar_tab == tab {
+                app.sidebar_open = false;
+            } else {
+                app.sidebar_tab = tab;
+            }
+        }
+        ui.add_space(2.0);
     }
 }
 
@@ -187,12 +206,13 @@ fn draw_sidebar_contents(ui: &mut Ui, app: &mut App) {
         .map(|device| device.display_name())
         .unwrap_or_else(|| "No device selected".to_string());
 
+    // Header with close button
     ui.horizontal(|ui| {
-        ui.heading("Device Manager");
+        ui.heading(tab_heading(app.sidebar_tab));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .small_button("⮜")
-                .on_hover_text("Collapse device manager")
+                .on_hover_text("Collapse sidebar")
                 .clicked()
             {
                 app.sidebar_open = false;
@@ -207,34 +227,129 @@ fn draw_sidebar_contents(ui: &mut Ui, app: &mut App) {
         .size(11.0),
     );
     ui.add_space(4.0);
+
+    // Tab bar
+    draw_tab_bar(ui, app);
+    ui.add_space(4.0);
     ui.separator();
 
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            egui::CollapsingHeader::new("Connected devices")
-                .default_open(true)
-                .show(ui, |ui| draw_connected_devices_section(ui, app));
+    // Tab content
+    match app.sidebar_tab {
+        SidebarTab::Devices => {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_devices_tab(ui, app);
+                });
+        }
+        SidebarTab::Location => {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_location_tab(ui, app);
+                });
+        }
+        SidebarTab::Crashes => {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_crashes_tab(ui, app);
+                });
+        }
+        SidebarTab::Watches => {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_watches_tab(ui, app);
+                });
+        }
+    }
+}
 
-            ui.add_space(6.0);
+fn tab_heading(tab: SidebarTab) -> &'static str {
+    match tab {
+        SidebarTab::Devices => "Devices",
+        SidebarTab::Location => "Location",
+        SidebarTab::Crashes => "Crashes",
+        SidebarTab::Watches => "Watches",
+    }
+}
 
-            egui::CollapsingHeader::new("Wireless debugging")
-                .default_open(true)
-                .show(ui, |ui| draw_wireless_debugging_section(ui, app));
+fn draw_tab_bar(ui: &mut Ui, app: &mut App) {
+    let is_dark = ui.visuals().dark_mode;
+    let active_color = if is_dark { OD_BLUE } else { OL_BLUE };
+    let inactive_color = if is_dark { OD_FG_DIM } else { OL_FG_DIM };
 
-            #[cfg(target_os = "macos")]
-            {
-                ui.add_space(6.0);
-                egui::CollapsingHeader::new("iOS simulator")
-                    .default_open(true)
-                    .show(ui, |ui| draw_ios_simulator_section(ui, app));
+    // Gather badge counts from focused pane
+    let crash_count = app
+        .panes
+        .get(&app.focused_pane)
+        .map(|p| p.crash_reports.len())
+        .unwrap_or(0);
+    let watch_count = app
+        .panes
+        .get(&app.focused_pane)
+        .map(|p| p.watches.len())
+        .unwrap_or(0);
+
+    let tabs: Vec<(SidebarTab, String)> = vec![
+        (SidebarTab::Devices, "📱 Devices".to_string()),
+        (SidebarTab::Location, "📍 Location".to_string()),
+        (
+            SidebarTab::Crashes,
+            if crash_count > 0 {
+                format!("🔴 {crash_count}")
+            } else {
+                "🔴 Crashes".to_string()
+            },
+        ),
+        (
+            SidebarTab::Watches,
+            if watch_count > 0 {
+                format!("👁 {watch_count}")
+            } else {
+                "👁 Watches".to_string()
+            },
+        ),
+    ];
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (tab, label) in &tabs {
+            let is_active = app.sidebar_tab == *tab;
+            let color = if is_active {
+                active_color
+            } else {
+                inactive_color
+            };
+            let response = ui.selectable_label(is_active, RichText::new(label).color(color).size(11.0));
+            if response.clicked() {
+                app.sidebar_tab = *tab;
             }
+        }
+    });
+}
 
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new("📍 Location Spoofing")
-                .default_open(false)
-                .show(ui, |ui| draw_location_spoofing_section(ui, app));
-        });
+// ─── Tab 1: Devices ───────────────────────────────────────────────────────────
+
+fn draw_devices_tab(ui: &mut Ui, app: &mut App) {
+    egui::CollapsingHeader::new("Connected devices")
+        .default_open(true)
+        .show(ui, |ui| draw_connected_devices_section(ui, app));
+
+    ui.add_space(6.0);
+
+    egui::CollapsingHeader::new("Wireless debugging")
+        .default_open(true)
+        .show(ui, |ui| draw_wireless_debugging_section(ui, app));
+
+    #[cfg(target_os = "macos")]
+    {
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new("iOS simulator")
+            .default_open(true)
+            .show(ui, |ui| draw_ios_simulator_section(ui, app));
+    }
 }
 
 fn draw_connected_devices_section(ui: &mut Ui, app: &mut App) {
@@ -718,14 +833,26 @@ fn start_simulator_boot(app: &mut App, udid: String) {
     });
 }
 
-fn draw_location_spoofing_section(ui: &mut Ui, app: &mut App) {
+// ─── Tab 2: Location ──────────────────────────────────────────────────────────
+
+const BUILTIN_PRESETS: &[(&str, f64, f64)] = &[
+    ("Custom", 0.0, 0.0),
+    ("San Francisco", 37.7749, -122.4194),
+    ("New York", 40.7128, -74.0060),
+    ("London", 51.5074, -0.1278),
+    ("Tokyo", 35.6762, 139.6503),
+    ("Sydney", -33.8688, 151.2093),
+];
+
+fn draw_location_tab(ui: &mut Ui, app: &mut App) {
     let is_dark = ui.visuals().dark_mode;
 
     let focused_device = app
         .panes
         .get(&app.focused_pane)
         .and_then(|pane| pane.device.as_ref())
-        .and_then(|device_id| app.devices.iter().find(|d| d.id == *device_id));
+        .and_then(|device_id| app.devices.iter().find(|d| d.id == *device_id))
+        .cloned();
 
     let device_hint = match &focused_device {
         Some(d) if d.platform == DevicePlatform::IosSimulator => "iOS Simulator",
@@ -743,152 +870,483 @@ fn draw_location_spoofing_section(ui: &mut Ui, app: &mut App) {
     );
     ui.add_space(4.0);
 
-    let presets = [
-        ("Custom", 0.0, 0.0),
-        ("San Francisco", 37.7749, -122.4194),
-        ("New York", 40.7128, -74.0060),
-        ("London", 51.5074, -0.1278),
-        ("Tokyo", 35.6762, 139.6503),
-        ("Sydney", -33.8688, 151.2093),
-    ];
+    let device_id = focused_device.as_ref().map(|d| d.id.clone());
 
-    egui::ComboBox::from_id_salt("location_preset")
-        .selected_text(app.location_preset.as_str())
-        .width(180.0)
-        .show_ui(ui, |ui| {
-            for (name, lat, lon) in &presets {
-                if ui
-                    .selectable_value(&mut app.location_preset, name.to_string(), *name)
-                    .clicked()
-                    && *name != "Custom"
-                {
-                    app.location_lat = format!("{}", lat);
-                    app.location_lon = format!("{}", lon);
+    // Build combined preset list: built-in + saved
+    let mut all_presets: Vec<(String, f64, f64, bool)> = BUILTIN_PRESETS
+        .iter()
+        .map(|(name, lat, lon)| (name.to_string(), *lat, *lon, false))
+        .collect();
+    for loc in &app.saved_locations {
+        all_presets.push((loc.name.clone(), loc.lat, loc.lon, true));
+    }
+
+    // Get or create per-device location state
+    if let Some(ref dev_id) = device_id {
+        if !app.device_locations.contains_key(dev_id) {
+            app.device_locations
+                .insert(dev_id.clone(), DeviceLocationState::default());
+        }
+    }
+
+    if let Some(dev_id) = &device_id {
+        let loc_state = app.device_locations.get_mut(dev_id).unwrap();
+
+        egui::ComboBox::from_id_salt("location_preset_tab")
+            .selected_text(loc_state.preset.as_str())
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for (name, lat, lon, _is_custom) in &all_presets {
+                    if ui
+                        .selectable_value(&mut loc_state.preset, name.clone(), name.as_str())
+                        .clicked()
+                        && name != "Custom"
+                    {
+                        loc_state.lat = format!("{lat}");
+                        loc_state.lon = format!("{lon}");
+                    }
                 }
-            }
+            });
+
+        ui.add_space(4.0);
+
+        egui::Grid::new("location_grid_tab")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Lat:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut loc_state.lat)
+                        .hint_text("37.7749")
+                        .desired_width(150.0),
+                );
+                ui.end_row();
+
+                ui.label("Lon:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut loc_state.lon)
+                        .hint_text("-122.4194")
+                        .desired_width(150.0),
+                );
+                ui.end_row();
+            });
+
+        ui.add_space(4.0);
+
+        let task_running = app.location_pending.is_some();
+        let can_set = focused_device.as_ref().is_some_and(|d| {
+            d.platform == DevicePlatform::IosSimulator
+                || (d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id))
         });
 
-    ui.add_space(4.0);
+        // Read lat/lon from state for the button actions
+        let lat_str = loc_state.lat.clone();
+        let lon_str = loc_state.lon.clone();
+        let status = loc_state.status.clone();
 
-    egui::Grid::new("location_grid")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("Lat:");
-            ui.add(
-                egui::TextEdit::singleline(&mut app.location_lat)
-                    .hint_text("37.7749")
-                    .desired_width(150.0),
-            );
-            ui.end_row();
-
-            ui.label("Lon:");
-            ui.add(
-                egui::TextEdit::singleline(&mut app.location_lon)
-                    .hint_text("-122.4194")
-                    .desired_width(150.0),
-            );
-            ui.end_row();
-        });
-
-    ui.add_space(4.0);
-
-    let task_running = app.location_rx.is_some();
-    let can_set = focused_device.is_some_and(|d| {
-        d.platform == DevicePlatform::IosSimulator
-            || (d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id))
-    });
-
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                can_set && !task_running,
-                egui::Button::new("Set Location"),
-            )
-            .clicked()
-        {
-            let lat = match app.location_lat.trim().parse::<f64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    app.location_status = Some((false, "Invalid latitude".to_string()));
-                    return;
-                }
-            };
-            let lon = match app.location_lon.trim().parse::<f64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    app.location_status = Some((false, "Invalid longitude".to_string()));
-                    return;
-                }
-            };
-
-            if let Some(device) = &focused_device {
-                let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
-                app.location_rx = Some(rx);
-                app.location_status = None;
-                let device_id = device.id.clone();
-                let platform = device.platform;
-                app.rt.spawn(async move {
-                    let result = match platform {
-                        DevicePlatform::IosSimulator => {
-                            catpane_core::ios::set_simulator_location(&device_id, lat, lon).await
-                        }
-                        DevicePlatform::Android => {
-                            catpane_core::adb::set_emulator_location(&device_id, lat, lon, None)
-                                .await
-                        }
-                    };
-                    let _ = tx.send(result).await;
-                });
-            }
-        }
-
-        let can_clear = focused_device
-            .is_some_and(|d| d.platform == DevicePlatform::IosSimulator);
-        if ui
-            .add_enabled(
-                can_clear && !task_running,
-                egui::Button::new("Clear"),
-            )
-            .on_hover_text("Clear spoofed location (iOS Simulator only)")
-            .clicked()
-        {
-            if let Some(device) = &focused_device {
-                let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
-                app.location_rx = Some(rx);
-                app.location_status = None;
-                let device_id = device.id.clone();
-                app.rt.spawn(async move {
-                    let result =
-                        catpane_core::ios::clear_simulator_location(&device_id).await;
-                    let _ = tx.send(result).await;
-                });
-            }
-        }
-
-        if app.location_status.is_some() && ui.small_button("✕").clicked() {
-            app.location_status = None;
-        }
-    });
-
-    if task_running {
         ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(RichText::new("Setting location…").size(12.0));
+            if ui
+                .add_enabled(
+                    can_set && !task_running,
+                    egui::Button::new("Set Location"),
+                )
+                .clicked()
+            {
+                let lat = match lat_str.trim().parse::<f64>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        if let Some(state) = app.device_locations.get_mut(dev_id) {
+                            state.status = Some((false, "Invalid latitude".to_string()));
+                        }
+                        return;
+                    }
+                };
+                let lon = match lon_str.trim().parse::<f64>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        if let Some(state) = app.device_locations.get_mut(dev_id) {
+                            state.status = Some((false, "Invalid longitude".to_string()));
+                        }
+                        return;
+                    }
+                };
+
+                if let Some(device) = &focused_device {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                    app.location_pending = Some((dev_id.clone(), rx));
+                    if let Some(state) = app.device_locations.get_mut(dev_id) {
+                        state.status = None;
+                    }
+                    let device_id = device.id.clone();
+                    let platform = device.platform;
+                    app.rt.spawn(async move {
+                        let result = match platform {
+                            DevicePlatform::IosSimulator => {
+                                catpane_core::ios::set_simulator_location(&device_id, lat, lon).await
+                            }
+                            DevicePlatform::Android => {
+                                catpane_core::adb::set_emulator_location(&device_id, lat, lon, None)
+                                    .await
+                            }
+                        };
+                        let _ = tx.send(result).await;
+                    });
+                }
+            }
+
+            let can_clear = focused_device
+                .as_ref()
+                .is_some_and(|d| d.platform == DevicePlatform::IosSimulator);
+            if ui
+                .add_enabled(
+                    can_clear && !task_running,
+                    egui::Button::new("Clear"),
+                )
+                .on_hover_text("Clear spoofed location (iOS Simulator only)")
+                .clicked()
+            {
+                if let Some(device) = &focused_device {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                    app.location_pending = Some((dev_id.clone(), rx));
+                    if let Some(state) = app.device_locations.get_mut(dev_id) {
+                        state.status = None;
+                    }
+                    let device_id = device.id.clone();
+                    app.rt.spawn(async move {
+                        let result =
+                            catpane_core::ios::clear_simulator_location(&device_id).await;
+                        let _ = tx.send(result).await;
+                    });
+                }
+            }
+
+            if status.is_some() && ui.small_button("✕").clicked() {
+                if let Some(state) = app.device_locations.get_mut(dev_id) {
+                    state.status = None;
+                }
+            }
+        });
+
+        if task_running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Setting location…").size(12.0));
+            });
+        }
+
+        if let Some((success, message)) = &status {
+            let color = if *success {
+                if is_dark { OD_GREEN } else { OL_GREEN }
+            } else if is_dark {
+                OD_RED
+            } else {
+                OL_RED
+            };
+            ui.label(RichText::new(message.as_str()).color(color).size(12.0));
+        }
+    } else {
+        ui.label(RichText::new("Select a device to set location.").weak());
+    }
+
+    // ── Saved Locations section ──
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(RichText::new("Saved Locations").strong().size(13.0));
+
+    // Save current location
+    if device_id.is_some() {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.save_location_name)
+                    .hint_text("Location name")
+                    .desired_width(120.0),
+            );
+            if ui
+                .add_enabled(
+                    !app.save_location_name.trim().is_empty(),
+                    egui::Button::new("Save Current"),
+                )
+                .clicked()
+            {
+                if let Some(dev_id) = &device_id {
+                    if let Some(state) = app.device_locations.get(dev_id) {
+                        if let (Ok(lat), Ok(lon)) = (
+                            state.lat.trim().parse::<f64>(),
+                            state.lon.trim().parse::<f64>(),
+                        ) {
+                            app.saved_locations.push(SavedLocation {
+                                name: app.save_location_name.trim().to_string(),
+                                lat,
+                                lon,
+                            });
+                            app.save_location_name.clear();
+                            app.persist_saved_locations();
+                        }
+                    }
+                }
+            }
         });
     }
 
-    if let Some((success, message)) = &app.location_status {
-        let color = if *success {
-            if is_dark { OD_GREEN } else { OL_GREEN }
-        } else if is_dark {
-            OD_RED
-        } else {
-            OL_RED
-        };
-        ui.label(RichText::new(message.as_str()).color(color).size(12.0));
+    if app.saved_locations.is_empty() {
+        ui.label(RichText::new("No saved locations yet.").weak().size(11.0));
+    } else {
+        let mut to_delete: Option<usize> = None;
+        let mut to_use: Option<usize> = None;
+
+        for (i, loc) in app.saved_locations.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{} ({:.4}, {:.4})", loc.name, loc.lat, loc.lon))
+                        .size(11.0),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text("Delete").clicked() {
+                        to_delete = Some(i);
+                    }
+                    if ui.small_button("Use").clicked() {
+                        to_use = Some(i);
+                    }
+                });
+            });
+        }
+
+        if let Some(idx) = to_use {
+            let loc = &app.saved_locations[idx];
+            if let Some(dev_id) = &device_id {
+                let state = app
+                    .device_locations
+                    .entry(dev_id.clone())
+                    .or_default();
+                state.lat = format!("{}", loc.lat);
+                state.lon = format!("{}", loc.lon);
+                state.preset = loc.name.clone();
+            }
+        }
+
+        if let Some(idx) = to_delete {
+            app.saved_locations.remove(idx);
+            app.persist_saved_locations();
+        }
     }
 }
+
+// ─── Tab 3: Crashes ───────────────────────────────────────────────────────────
+
+fn crash_type_label(ct: CrashType) -> &'static str {
+    match ct {
+        CrashType::JavaException => "Java Exception",
+        CrashType::NativeCrash => "Native Crash",
+        CrashType::Anr => "ANR",
+        CrashType::IosCrash => "iOS Crash",
+    }
+}
+
+fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
+    let is_dark = ui.visuals().dark_mode;
+
+    let crash_reports: Vec<_> = app
+        .panes
+        .get(&app.focused_pane)
+        .map(|p| p.crash_reports.clone())
+        .unwrap_or_default();
+
+    let count = crash_reports.len();
+    ui.label(
+        RichText::new(format!("🔴 Crashes ({count})"))
+            .strong()
+            .size(13.0),
+    );
+    ui.add_space(4.0);
+
+    if crash_reports.is_empty() {
+        ui.label(RichText::new("No crashes detected").weak());
+        return;
+    }
+
+    // Show newest first
+    for (display_idx, report) in crash_reports.iter().rev().enumerate() {
+        let original_idx = crash_reports.len() - 1 - display_idx;
+
+        let badge_color = if is_dark { OD_RED } else { OL_RED };
+        let type_label = crash_type_label(report.crash_type);
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(type_label).color(badge_color).strong().size(11.0));
+                if !report.timestamp.is_empty() {
+                    ui.label(RichText::new(&report.timestamp).weak().size(10.0));
+                }
+            });
+
+            // Summary (headline)
+            let summary = if report.headline.len() > 80 {
+                format!("{}…", &report.headline[..80])
+            } else {
+                report.headline.clone()
+            };
+            ui.label(RichText::new(&summary).size(11.0));
+
+            // Expandable detail
+            let is_expanded = app.expanded_crashes.contains(&original_idx);
+            ui.horizontal(|ui| {
+                let toggle_text = if is_expanded { "▾ Hide details" } else { "▸ Show details" };
+                if ui.small_button(toggle_text).clicked() {
+                    if is_expanded {
+                        app.expanded_crashes.remove(&original_idx);
+                    } else {
+                        app.expanded_crashes.insert(original_idx);
+                    }
+                }
+
+                // Copy button
+                if ui.small_button("📋 Copy").clicked() {
+                    let mut text = format!("[{}] {}\n{}\n", type_label, report.timestamp, report.headline);
+                    // Gather context lines from pane entries
+                    if let Some(pane) = app.panes.get(&app.focused_pane) {
+                        let start = report.first_index;
+                        let end = report.last_index.min(pane.entries.len().saturating_sub(1));
+                        for i in start..=end {
+                            if let Some(entry) = pane.entries.get(i) {
+                                text.push_str(&format!(
+                                    "{} {} {}: {}\n",
+                                    entry.timestamp,
+                                    entry.level.as_char(),
+                                    entry.tag,
+                                    entry.message
+                                ));
+                            }
+                        }
+                    }
+                    ui.ctx().copy_text(text);
+                }
+            });
+
+            if is_expanded {
+                ui.add_space(2.0);
+                // Show context lines from pane entries
+                if let Some(pane) = app.panes.get(&app.focused_pane) {
+                    let crash_indices = &pane.crash_line_indices;
+                    let start = report.first_index;
+                    let end = report.last_index.min(pane.entries.len().saturating_sub(1));
+                    for i in start..=end {
+                        if let Some(entry) = pane.entries.get(i) {
+                            let is_crash_line = crash_indices.contains(&i);
+                            let line_text = format!(
+                                "{} {} {}: {}",
+                                entry.timestamp,
+                                entry.level.as_char(),
+                                entry.tag,
+                                entry.message
+                            );
+                            let color = if is_crash_line {
+                                if is_dark { OD_RED } else { OL_RED }
+                            } else if is_dark {
+                                OD_FG_DIM
+                            } else {
+                                OL_FG_DIM
+                            };
+                            ui.label(
+                                RichText::new(&line_text)
+                                    .color(color)
+                                    .monospace()
+                                    .size(10.0),
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        ui.add_space(2.0);
+    }
+
+    ui.add_space(4.0);
+    if ui.button("Clear All Crashes").clicked() {
+        if let Some(pane) = app.panes.get_mut(&app.focused_pane) {
+            pane.crash_reports.clear();
+            pane.crash_line_indices.clear();
+            pane.crash_nav_index = None;
+        }
+        app.expanded_crashes.clear();
+    }
+}
+
+// ─── Tab 4: Watches ───────────────────────────────────────────────────────────
+
+fn draw_watches_tab(ui: &mut Ui, app: &mut App) {
+    ui.label(
+        RichText::new("Watches highlight log lines matching a pattern. Add patterns below to monitor specific events.")
+            .weak()
+            .size(11.0),
+    );
+    ui.add_space(6.0);
+
+    ui.label(RichText::new("Add Watch").strong().size(13.0));
+
+    let focused_pane = app.focused_pane;
+    let Some(pane) = app.panes.get_mut(&focused_pane) else {
+        ui.label(RichText::new("No focused pane").weak());
+        return;
+    };
+
+    let watch_response = ui.add(
+        egui::TextEdit::singleline(&mut pane.watch_input)
+            .desired_width(ui.available_width() - 80.0)
+            .hint_text("e.g. Exception, OOM, ANR")
+            .id(ui.id().with("sidebar_watch_input")),
+    );
+    let enter_pressed =
+        watch_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let add_clicked = ui.button("Add Watch").clicked();
+
+    if enter_pressed || add_clicked {
+        let pattern = pane.watch_input.trim().to_string();
+        if !pattern.is_empty() {
+            let name = pattern.clone();
+            pane.add_watch(name, pattern);
+            pane.watch_input.clear();
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(RichText::new("Active Watches").strong().size(13.0));
+
+    if pane.watches.is_empty() {
+        ui.label(
+            RichText::new("No active watches. Add a pattern above to start monitoring.")
+                .weak()
+                .size(11.0),
+        );
+        return;
+    }
+
+    let mut watch_to_remove: Option<usize> = None;
+    for i in 0..pane.watches.len() {
+        let watch = &pane.watches[i];
+        let (r, g, b) = WATCH_COLORS[watch.color_index % WATCH_COLORS.len()];
+        let color = egui::Color32::from_rgb(r, g, b);
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("●").color(color));
+            ui.label(
+                RichText::new(format!("{} ({})", watch.name, watch.match_count)).size(12.0),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.small_button("✕").on_hover_text("Remove watch").clicked() {
+                    watch_to_remove = Some(i);
+                }
+            });
+        });
+    }
+    if let Some(idx) = watch_to_remove {
+        pane.remove_watch(idx);
+    }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn set_wireless_status(app: &mut App, result: Result<String, String>) {
     match result {
