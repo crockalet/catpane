@@ -784,6 +784,48 @@ fn extract_ip_from_route_output(output: &str) -> Option<String> {
     None
 }
 
+const ADB_LOCATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Check if a device serial looks like an Android emulator.
+pub fn is_emulator(serial: &str) -> bool {
+    serial.starts_with("emulator-")
+}
+
+/// Set the GPS location on an Android emulator.
+/// Only works on emulator devices (serial starting with "emulator-").
+/// The `adb emu geo fix` command takes longitude first, then latitude.
+pub async fn set_emulator_location(
+    serial: &str,
+    lat: f64,
+    lon: f64,
+    alt: Option<f64>,
+) -> Result<String, String> {
+    if !is_emulator(serial) {
+        return Err(format!(
+            "Location spoofing via adb is only supported on emulators, not physical device '{}'",
+            serial
+        ));
+    }
+    // adb emu geo fix <longitude> <latitude> [<altitude>]
+    let mut args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "emu".to_string(),
+        "geo".to_string(),
+        "fix".to_string(),
+        format!("{}", lon),
+        format!("{}", lat),
+    ];
+    if let Some(altitude) = alt {
+        args.push(format!("{}", altitude));
+    }
+
+    let cmd = adb_command(args, "set emulator location", ADB_LOCATION_TIMEOUT);
+    let output = cmd.run().await?;
+    cmd.ensure_success(output)?;
+    Ok(format!("Location set to {}, {} on {}", lat, lon, serial))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

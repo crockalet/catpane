@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, error::Error, fmt, str::FromStr};
 
 use catpane_core::{
+    crash_detector::{CrashReport, detect_crashes_indexed},
     filter::Filter,
     log_entry::{LogEntry, LogLevel},
 };
@@ -393,6 +394,56 @@ impl LogBuffer {
                 has_more,
             },
         }
+    }
+
+    /// Run crash detection over all buffered entries, returning reports with
+    /// their first and last sequence numbers.
+    pub fn detect_crashes(&self) -> Vec<(CrashReport, u64, u64)> {
+        let indexed: Vec<(usize, &LogEntry)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, buffered)| (i, &buffered.entry))
+            .collect();
+
+        let reports = detect_crashes_indexed(&indexed);
+
+        reports
+            .into_iter()
+            .map(|report| {
+                let first_seq = self.entries[report.first_index].seq;
+                let last_seq = self.entries[report.last_index].seq;
+                (report, first_seq, last_seq)
+            })
+            .collect()
+    }
+
+    /// Scan entries in ascending order, collecting up to `limit` entries where `matcher` returns true.
+    /// If `since_seq` is provided, only entries with `seq > since_seq` are considered.
+    pub fn scan_matching<F>(
+        &self,
+        since_seq: Option<u64>,
+        limit: usize,
+        matcher: F,
+    ) -> Vec<BufferedLogEntry>
+    where
+        F: Fn(&LogEntry) -> bool,
+    {
+        let mut results = Vec::with_capacity(limit.min(self.entries.len()));
+        for buffered in &self.entries {
+            if let Some(since) = since_seq {
+                if buffered.seq <= since {
+                    continue;
+                }
+            }
+            if matcher(&buffered.entry) {
+                results.push(buffered.clone());
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+        results
     }
 }
 

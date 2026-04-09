@@ -97,6 +97,12 @@ pub struct App {
     pub ios_simulator_status: Option<(bool, String)>,
     pub ios_simulator_booting_udid: Option<String>,
     pub ios_simulator_boot_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
+    // Location spoofing state
+    pub location_lat: String,
+    pub location_lon: String,
+    pub location_preset: String,
+    pub location_status: Option<(bool, String)>,
+    pub location_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 impl App {
@@ -138,6 +144,11 @@ impl App {
             ios_simulator_status: None,
             ios_simulator_booting_udid: None,
             ios_simulator_boot_rx: None,
+            location_lat: String::new(),
+            location_lon: String::new(),
+            location_preset: "Custom".to_string(),
+            location_status: None,
+            location_rx: None,
         };
         app.ensure_pane_capture(id);
         app
@@ -189,6 +200,7 @@ impl App {
             || self.ios_simulator_refresh_pending
             || self.ios_simulator_boot_rx.is_some()
             || self.ios_simulator_booting_udid.is_some()
+            || self.location_rx.is_some()
         {
             return true;
         }
@@ -606,6 +618,11 @@ impl App {
             ios_simulator_status: None,
             ios_simulator_booting_udid: None,
             ios_simulator_boot_rx: None,
+            location_lat: String::new(),
+            location_lon: String::new(),
+            location_preset: "Custom".to_string(),
+            location_status: None,
+            location_rx: None,
         };
 
         for pane_id in pane_ids {

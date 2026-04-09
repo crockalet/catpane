@@ -718,6 +718,7 @@ name = "catpane-mcp"
 version = "0.1.0"
 dependencies = [
  "catpane-core",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

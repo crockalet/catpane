@@ -165,6 +165,26 @@ impl eframe::App for CatPaneApp {
                 }
             }
 
+            let location_result = if let Some(rx) = &mut self.app.location_rx {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        Some(Err("Location task ended unexpectedly".to_string()))
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(result) = location_result {
+                self.app.location_rx = None;
+                match result {
+                    Ok(message) => self.app.location_status = Some((true, message)),
+                    Err(message) => self.app.location_status = Some((false, message)),
+                }
+            }
+
             let mut tracker_devices: Option<Vec<ConnectedDevice>> = None;
             if let Some(tracker) = &mut self.app.device_tracker {
                 while let Ok(devices) = tracker.try_recv() {

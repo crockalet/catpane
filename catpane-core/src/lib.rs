@@ -1,12 +1,14 @@
 pub mod adb;
 pub mod capture;
 pub mod command;
+pub mod crash_detector;
 pub mod filter;
 pub mod ios;
 pub mod log_buffer_config;
 pub mod log_entry;
 
 pub use capture::{CaptureController, CaptureHandle, ConnectedDevice, DevicePlatform};
+pub use crash_detector::{CrashDetector, CrashReport, CrashType, detect_crashes};
 pub use filter::{Filter, TagFilter, TagLevelMatcher};
 pub use ios::IosSimulator;
 pub use log_buffer_config::{

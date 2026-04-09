@@ -2,7 +2,7 @@ use egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 
 use super::theme::*;
 use crate::app::{App, QrPairStatus, QrPairingState};
-use catpane_core::capture::ConnectedDevice;
+use catpane_core::capture::{ConnectedDevice, DevicePlatform};
 
 const SIDEBAR_CARD_LEFT_MARGIN: f32 = 4.0;
 const SIDEBAR_CARD_VERTICAL_MARGIN: f32 = 4.0;
@@ -229,6 +229,11 @@ fn draw_sidebar_contents(ui: &mut Ui, app: &mut App) {
                     .default_open(true)
                     .show(ui, |ui| draw_ios_simulator_section(ui, app));
             }
+
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new("📍 Location Spoofing")
+                .default_open(false)
+                .show(ui, |ui| draw_location_spoofing_section(ui, app));
         });
 }
 
@@ -711,6 +716,178 @@ fn start_simulator_boot(app: &mut App, udid: String) {
         let result = catpane_core::ios::boot_simulator(&udid).await;
         let _ = tx.send(result).await;
     });
+}
+
+fn draw_location_spoofing_section(ui: &mut Ui, app: &mut App) {
+    let is_dark = ui.visuals().dark_mode;
+
+    let focused_device = app
+        .panes
+        .get(&app.focused_pane)
+        .and_then(|pane| pane.device.as_ref())
+        .and_then(|device_id| app.devices.iter().find(|d| d.id == *device_id));
+
+    let device_hint = match &focused_device {
+        Some(d) if d.platform == DevicePlatform::IosSimulator => "iOS Simulator",
+        Some(d) if d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id) => {
+            "Android Emulator"
+        }
+        Some(d) if d.platform == DevicePlatform::Android => "Android (physical – not supported)",
+        _ => "No device selected",
+    };
+
+    ui.label(
+        RichText::new(format!("Target: {device_hint}"))
+            .weak()
+            .size(11.0),
+    );
+    ui.add_space(4.0);
+
+    let presets = [
+        ("Custom", 0.0, 0.0),
+        ("San Francisco", 37.7749, -122.4194),
+        ("New York", 40.7128, -74.0060),
+        ("London", 51.5074, -0.1278),
+        ("Tokyo", 35.6762, 139.6503),
+        ("Sydney", -33.8688, 151.2093),
+    ];
+
+    egui::ComboBox::from_id_salt("location_preset")
+        .selected_text(app.location_preset.as_str())
+        .width(180.0)
+        .show_ui(ui, |ui| {
+            for (name, lat, lon) in &presets {
+                if ui
+                    .selectable_value(&mut app.location_preset, name.to_string(), *name)
+                    .clicked()
+                    && *name != "Custom"
+                {
+                    app.location_lat = format!("{}", lat);
+                    app.location_lon = format!("{}", lon);
+                }
+            }
+        });
+
+    ui.add_space(4.0);
+
+    egui::Grid::new("location_grid")
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Lat:");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.location_lat)
+                    .hint_text("37.7749")
+                    .desired_width(150.0),
+            );
+            ui.end_row();
+
+            ui.label("Lon:");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.location_lon)
+                    .hint_text("-122.4194")
+                    .desired_width(150.0),
+            );
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+
+    let task_running = app.location_rx.is_some();
+    let can_set = focused_device.is_some_and(|d| {
+        d.platform == DevicePlatform::IosSimulator
+            || (d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id))
+    });
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                can_set && !task_running,
+                egui::Button::new("Set Location"),
+            )
+            .clicked()
+        {
+            let lat = match app.location_lat.trim().parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    app.location_status = Some((false, "Invalid latitude".to_string()));
+                    return;
+                }
+            };
+            let lon = match app.location_lon.trim().parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    app.location_status = Some((false, "Invalid longitude".to_string()));
+                    return;
+                }
+            };
+
+            if let Some(device) = &focused_device {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                app.location_rx = Some(rx);
+                app.location_status = None;
+                let device_id = device.id.clone();
+                let platform = device.platform;
+                app.rt.spawn(async move {
+                    let result = match platform {
+                        DevicePlatform::IosSimulator => {
+                            catpane_core::ios::set_simulator_location(&device_id, lat, lon).await
+                        }
+                        DevicePlatform::Android => {
+                            catpane_core::adb::set_emulator_location(&device_id, lat, lon, None)
+                                .await
+                        }
+                    };
+                    let _ = tx.send(result).await;
+                });
+            }
+        }
+
+        let can_clear = focused_device
+            .is_some_and(|d| d.platform == DevicePlatform::IosSimulator);
+        if ui
+            .add_enabled(
+                can_clear && !task_running,
+                egui::Button::new("Clear"),
+            )
+            .on_hover_text("Clear spoofed location (iOS Simulator only)")
+            .clicked()
+        {
+            if let Some(device) = &focused_device {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                app.location_rx = Some(rx);
+                app.location_status = None;
+                let device_id = device.id.clone();
+                app.rt.spawn(async move {
+                    let result =
+                        catpane_core::ios::clear_simulator_location(&device_id).await;
+                    let _ = tx.send(result).await;
+                });
+            }
+        }
+
+        if app.location_status.is_some() && ui.small_button("✕").clicked() {
+            app.location_status = None;
+        }
+    });
+
+    if task_running {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("Setting location…").size(12.0));
+        });
+    }
+
+    if let Some((success, message)) = &app.location_status {
+        let color = if *success {
+            if is_dark { OD_GREEN } else { OL_GREEN }
+        } else if is_dark {
+            OD_RED
+        } else {
+            OL_RED
+        };
+        ui.label(RichText::new(message.as_str()).color(color).size(12.0));
+    }
 }
 
 fn set_wireless_status(app: &mut App, result: Result<String, String>) {

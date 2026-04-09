@@ -162,6 +162,33 @@ pub async fn boot_simulator(udid: &str) -> Result<String, String> {
     }
 }
 
+const SIMCTL_LOCATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Set the GPS location of a booted iOS Simulator.
+pub async fn set_simulator_location(udid: &str, lat: f64, lon: f64) -> Result<String, String> {
+    let coord = format!("{},{}", lat, lon);
+    let cmd = xcrun_command(
+        ["simctl", "location", udid, "set", &coord],
+        "set simulator location",
+        SIMCTL_LOCATION_TIMEOUT,
+    );
+    let output = cmd.run().await?;
+    cmd.ensure_success(output)?;
+    Ok(format!("Location set to {}, {} on {}", lat, lon, udid))
+}
+
+/// Clear any spoofed GPS location on a booted iOS Simulator.
+pub async fn clear_simulator_location(udid: &str) -> Result<String, String> {
+    let cmd = xcrun_command(
+        ["simctl", "location", udid, "clear"],
+        "clear simulator location",
+        SIMCTL_LOCATION_TIMEOUT,
+    );
+    let output = cmd.run().await?;
+    cmd.ensure_success(output)?;
+    Ok(format!("Location cleared on {}", udid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_simulators;

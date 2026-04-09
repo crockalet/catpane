@@ -18,7 +18,8 @@ use catpane_core::{
 
 use crate::{
     log_buffer::{
-        BufferedLogEntry, LogBuffer, LogBufferMeta, LogPage, LogPageMeta, LogQuery, PageOrder,
+        BufferedLogEntry, LogBuffer, LogBufferMeta, LogPage, LogPageMeta, LogQuery,
+        NormalizedTimestamp, PageOrder,
     },
     protocol::{CallToolParams, CallToolResult, JsonObject, JsonSchema, Tool, ToolContent},
 };
@@ -29,9 +30,23 @@ pub const TOOL_CLEAR_LOGS: &str = "clear_logs";
 pub const TOOL_START_CAPTURE: &str = "start_capture";
 pub const TOOL_STOP_CAPTURE: &str = "stop_capture";
 pub const TOOL_GET_STATUS: &str = "get_status";
+pub const TOOL_LIST_PACKAGES: &str = "list_packages";
+pub const TOOL_BOOT_SIMULATOR: &str = "boot_simulator";
+pub const TOOL_CONNECT_DEVICE: &str = "connect_device";
+pub const TOOL_DISCONNECT_DEVICE: &str = "disconnect_device";
+pub const TOOL_PAIR_DEVICE: &str = "pair_device";
+pub const TOOL_RESTART_ADB: &str = "restart_adb";
+pub const TOOL_CREATE_WATCH: &str = "create_watch";
+pub const TOOL_LIST_WATCHES: &str = "list_watches";
+pub const TOOL_GET_WATCH_MATCHES: &str = "get_watch_matches";
+pub const TOOL_DELETE_WATCH: &str = "delete_watch";
+pub const TOOL_SET_LOCATION: &str = "set_location";
+pub const TOOL_CLEAR_LOCATION: &str = "clear_location";
+pub const TOOL_GET_CRASHES: &str = "get_crashes";
 
 pub const DEFAULT_GET_LOGS_LIMIT: usize = 100;
 pub const MAX_GET_LOGS_LIMIT: usize = 1_000;
+pub const DEFAULT_GET_CRASHES_LIMIT: usize = 10;
 
 const CAPTURE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_CAPTURE_REASON: &str = "stopped by stop_capture";
@@ -214,6 +229,215 @@ impl GetStatusArgs {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPackagesArgs {
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPackagesResponse {
+    pub packages: Vec<String>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootSimulatorArgs {
+    pub udid: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootSimulatorResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectDeviceArgs {
+    pub host_port: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectDeviceResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisconnectDeviceArgs {
+    pub device: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectDeviceResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PairDeviceArgs {
+    pub host_port: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairDeviceResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestartAdbArgs {}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartAdbResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetLocationArgs {
+    #[serde(default)]
+    pub device: Option<String>,
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default)]
+    pub altitude: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLocationResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearLocationArgs {
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearLocationResponse {
+    pub message: String,
+}
+
+fn default_pattern_type() -> String {
+    "text".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateWatchArgs {
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    pub name: String,
+    pub pattern: String,
+    #[serde(default = "default_pattern_type")]
+    pub pattern_type: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub min_level: Option<String>,
+}
+
+impl CreateWatchArgs {
+    fn selector(&self) -> CaptureSelector {
+        CaptureSelector::new(self.capture_id.clone(), self.device.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWatchResponse {
+    pub watch_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListWatchesArgs {
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+impl ListWatchesArgs {
+    fn selector(&self) -> CaptureSelector {
+        CaptureSelector::new(self.capture_id.clone(), self.device.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWatchesResponse {
+    pub watches: Vec<crate::watch::WatchSummary>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetWatchMatchesArgs {
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    pub watch_id: String,
+    #[serde(default)]
+    pub since_seq: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+impl GetWatchMatchesArgs {
+    fn selector(&self) -> CaptureSelector {
+        CaptureSelector::new(self.capture_id.clone(), self.device.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetWatchMatchesResponse {
+    pub entries: Vec<LogEntryView>,
+    pub match_count: usize,
+    pub watch: crate::watch::WatchSummary,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteWatchArgs {
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    pub watch_id: String,
+}
+
+impl DeleteWatchArgs {
+    fn selector(&self) -> CaptureSelector {
+        CaptureSelector::new(self.capture_id.clone(), self.device.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWatchResponse {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GetLogsArgs {
     #[serde(default)]
     pub capture_id: Option<String>,
@@ -290,6 +514,47 @@ impl GetLogsArgs {
 
         Ok(query)
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetCrashesArgs {
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub crash_type: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+impl GetCrashesArgs {
+    fn selector(&self) -> CaptureSelector {
+        CaptureSelector::new(self.capture_id.clone(), self.device.clone())
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCrashesResponse {
+    pub crashes: Vec<CrashReportView>,
+    pub total_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrashReportView {
+    pub crash_type: catpane_core::CrashType,
+    pub headline: String,
+    pub stack_trace: Vec<String>,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub timestamp: String,
+    pub pid: Option<u32>,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -491,6 +756,19 @@ pub fn tool_definitions() -> Vec<Tool> {
         start_capture_tool(),
         stop_capture_tool(),
         get_status_tool(),
+        list_packages_tool(),
+        boot_simulator_tool(),
+        connect_device_tool(),
+        disconnect_device_tool(),
+        pair_device_tool(),
+        restart_adb_tool(),
+        set_location_tool(),
+        clear_location_tool(),
+        get_crashes_tool(),
+        create_watch_tool(),
+        list_watches_tool(),
+        get_watch_matches_tool(),
+        delete_watch_tool(),
     ]
 }
 
@@ -657,6 +935,16 @@ impl McpRuntimeState {
         capture.query_logs(args)
     }
 
+    pub fn get_crashes(&self, args: GetCrashesArgs) -> Result<GetCrashesResponse, McpToolError> {
+        let selector = args.selector();
+        let inner = lock_recover(&self.inner);
+        let capture_id = resolve_capture_id(&inner.captures, &selector)?;
+        let capture = inner.captures.get(&capture_id).ok_or_else(|| {
+            McpToolError::not_found(format!("capture {capture_id} was not found"))
+        })?;
+        capture.get_crashes(args)
+    }
+
     pub async fn get_status(&self, args: GetStatusArgs) -> Result<GetStatusResponse, McpToolError> {
         let selector = args.selector();
         let (capture_count, running_capture_count, captures) = {
@@ -703,6 +991,165 @@ impl McpRuntimeState {
         })
     }
 
+    pub fn create_watch(&self, args: CreateWatchArgs) -> Result<CreateWatchResponse, McpToolError> {
+        let selector = args.selector();
+        let shared = {
+            let inner = lock_recover(&self.inner);
+            let capture_id = resolve_capture_id(&inner.captures, &selector)?;
+            let capture = inner.captures.get(&capture_id).ok_or_else(|| {
+                McpToolError::not_found(format!("capture {capture_id} was not found"))
+            })?;
+            Arc::clone(&capture.shared)
+        };
+
+        let name = args.name.trim().to_owned();
+        if name.is_empty() {
+            return Err(McpToolError::invalid_params("name must not be empty"));
+        }
+        let pattern = args.pattern.clone();
+        if pattern.is_empty() {
+            return Err(McpToolError::invalid_params("pattern must not be empty"));
+        }
+
+        let tag = normalize_optional_string(args.tag);
+        let min_level = normalize_optional_string(args.min_level)
+            .as_deref()
+            .map(parse_log_level)
+            .transpose()?;
+
+        let watch = match args.pattern_type.as_str() {
+            "text" => crate::watch::Watch::new_text(name.clone(), pattern, tag, min_level),
+            "regex" => crate::watch::Watch::new_regex(name.clone(), &pattern, tag, min_level)
+                .map_err(McpToolError::invalid_params)?,
+            other => {
+                return Err(McpToolError::invalid_params(format!(
+                    "pattern_type must be \"text\" or \"regex\", got \"{other}\""
+                )));
+            }
+        };
+
+        let watch_id = {
+            let mut watches = lock_recover(&shared.watches);
+            watches.add(watch)
+        };
+
+        Ok(CreateWatchResponse {
+            watch_id,
+            name,
+        })
+    }
+
+    pub fn list_watches(
+        &self,
+        args: ListWatchesArgs,
+    ) -> Result<ListWatchesResponse, McpToolError> {
+        let selector = args.selector();
+        let shared = {
+            let inner = lock_recover(&self.inner);
+            let capture_id = resolve_capture_id(&inner.captures, &selector)?;
+            let capture = inner.captures.get(&capture_id).ok_or_else(|| {
+                McpToolError::not_found(format!("capture {capture_id} was not found"))
+            })?;
+            Arc::clone(&capture.shared)
+        };
+
+        let watches = lock_recover(&shared.watches);
+        let summaries = watches.list();
+        let count = summaries.len();
+        Ok(ListWatchesResponse {
+            watches: summaries,
+            count,
+        })
+    }
+
+    pub fn get_watch_matches(
+        &self,
+        args: GetWatchMatchesArgs,
+    ) -> Result<GetWatchMatchesResponse, McpToolError> {
+        let selector = args.selector();
+        let shared = {
+            let inner = lock_recover(&self.inner);
+            let capture_id = resolve_capture_id(&inner.captures, &selector)?;
+            let capture = inner.captures.get(&capture_id).ok_or_else(|| {
+                McpToolError::not_found(format!("capture {capture_id} was not found"))
+            })?;
+            Arc::clone(&capture.shared)
+        };
+
+        let limit = args.limit.unwrap_or(DEFAULT_GET_LOGS_LIMIT);
+        if limit > MAX_GET_LOGS_LIMIT {
+            return Err(McpToolError::invalid_params(format!(
+                "limit must be <= {MAX_GET_LOGS_LIMIT}"
+            )));
+        }
+
+        // Clone the watch so we can release the watches lock before scanning the buffer.
+        let watch_clone = {
+            let watches = lock_recover(&shared.watches);
+            watches
+                .get(&args.watch_id)
+                .ok_or_else(|| {
+                    McpToolError::not_found(format!(
+                        "watch `{}` was not found",
+                        args.watch_id
+                    ))
+                })?
+                .clone()
+        };
+
+        let matched_entries = {
+            let buffer = lock_recover(&shared.buffer);
+            buffer.scan_matching(args.since_seq, limit, |entry| watch_clone.matches(entry))
+        };
+
+        let match_count = matched_entries.len();
+        let last_matched_seq = matched_entries.last().map(|e| e.seq);
+
+        // Update stats on the real watch for newly matched entries.
+        let summary = {
+            let mut watches = lock_recover(&shared.watches);
+            if let Some(watch) = watches.get_mut(&args.watch_id) {
+                watch.match_count = watch.match_count.saturating_add(match_count as u64);
+                if let Some(seq) = last_matched_seq {
+                    if watch.last_match_seq.is_none_or(|prev| seq > prev) {
+                        watch.last_match_seq = Some(seq);
+                    }
+                }
+                watch.summary()
+            } else {
+                watch_clone.summary()
+            }
+        };
+
+        Ok(GetWatchMatchesResponse {
+            entries: matched_entries
+                .into_iter()
+                .map(LogEntryView::from)
+                .collect(),
+            match_count,
+            watch: summary,
+        })
+    }
+
+    pub fn delete_watch(
+        &self,
+        args: DeleteWatchArgs,
+    ) -> Result<DeleteWatchResponse, McpToolError> {
+        let selector = args.selector();
+        let shared = {
+            let inner = lock_recover(&self.inner);
+            let capture_id = resolve_capture_id(&inner.captures, &selector)?;
+            let capture = inner.captures.get(&capture_id).ok_or_else(|| {
+                McpToolError::not_found(format!("capture {capture_id} was not found"))
+            })?;
+            Arc::clone(&capture.shared)
+        };
+
+        let mut watches = lock_recover(&shared.watches);
+        let deleted = watches.remove(&args.watch_id);
+        Ok(DeleteWatchResponse { deleted })
+    }
+
     async fn dispatch_tool_call(
         &self,
         rt: &Handle,
@@ -732,6 +1179,58 @@ impl McpRuntimeState {
             TOOL_GET_STATUS => {
                 let args = parse_arguments::<GetStatusArgs>(&params)?;
                 json_success(&self.get_status(args).await?)
+            }
+            TOOL_LIST_PACKAGES => {
+                let args = parse_arguments::<ListPackagesArgs>(&params)?;
+                json_success(&handle_list_packages(args).await?)
+            }
+            TOOL_BOOT_SIMULATOR => {
+                let args = parse_arguments::<BootSimulatorArgs>(&params)?;
+                json_success(&handle_boot_simulator(args).await?)
+            }
+            TOOL_CONNECT_DEVICE => {
+                let args = parse_arguments::<ConnectDeviceArgs>(&params)?;
+                json_success(&handle_connect_device(args).await?)
+            }
+            TOOL_DISCONNECT_DEVICE => {
+                let args = parse_arguments::<DisconnectDeviceArgs>(&params)?;
+                json_success(&handle_disconnect_device(args).await?)
+            }
+            TOOL_PAIR_DEVICE => {
+                let args = parse_arguments::<PairDeviceArgs>(&params)?;
+                json_success(&handle_pair_device(args).await?)
+            }
+            TOOL_RESTART_ADB => {
+                let _args = parse_arguments::<RestartAdbArgs>(&params)?;
+                json_success(&handle_restart_adb().await?)
+            }
+            TOOL_SET_LOCATION => {
+                let args = parse_arguments::<SetLocationArgs>(&params)?;
+                json_success(&handle_set_location(args).await?)
+            }
+            TOOL_CLEAR_LOCATION => {
+                let args = parse_arguments::<ClearLocationArgs>(&params)?;
+                json_success(&handle_clear_location(args).await?)
+            }
+            TOOL_GET_CRASHES => {
+                let args = parse_arguments::<GetCrashesArgs>(&params)?;
+                json_success(&self.get_crashes(args)?)
+            }
+            TOOL_CREATE_WATCH => {
+                let args = parse_arguments::<CreateWatchArgs>(&params)?;
+                json_success(&self.create_watch(args)?)
+            }
+            TOOL_LIST_WATCHES => {
+                let args = parse_arguments::<ListWatchesArgs>(&params)?;
+                json_success(&self.list_watches(args)?)
+            }
+            TOOL_GET_WATCH_MATCHES => {
+                let args = parse_arguments::<GetWatchMatchesArgs>(&params)?;
+                json_success(&self.get_watch_matches(args)?)
+            }
+            TOOL_DELETE_WATCH => {
+                let args = parse_arguments::<DeleteWatchArgs>(&params)?;
+                json_success(&self.delete_watch(args)?)
             }
             _ => Err(McpToolError::unknown_tool(format!(
                 "unknown MCP tool: {}",
@@ -952,6 +1451,63 @@ impl CaptureRuntime {
         })
     }
 
+    fn get_crashes(&self, args: GetCrashesArgs) -> Result<GetCrashesResponse, McpToolError> {
+        let crash_type_filter = normalize_optional_string(args.crash_type)
+            .as_deref()
+            .map(parse_crash_type)
+            .transpose()?;
+        let since_ts = normalize_optional_string(args.since)
+            .as_deref()
+            .map(NormalizedTimestamp::parse)
+            .transpose()
+            .map_err(|err| {
+                McpToolError::invalid_params(format!("since must be MM-DD HH:MM:SS.mmm: {err}"))
+            })?;
+        let limit = args.limit.unwrap_or(DEFAULT_GET_CRASHES_LIMIT);
+
+        let raw_crashes = self.shared.detect_crashes();
+
+        let mut crashes: Vec<CrashReportView> = raw_crashes
+            .into_iter()
+            .filter(|(report, _, _)| {
+                if let Some(ct) = &crash_type_filter {
+                    if report.crash_type != *ct {
+                        return false;
+                    }
+                }
+                if let Some(since) = &since_ts {
+                    match NormalizedTimestamp::parse(&report.timestamp) {
+                        Ok(ts) if ts.sort_key() >= since.sort_key() => {}
+                        _ => return false,
+                    }
+                }
+                true
+            })
+            .map(|(report, first_seq, last_seq)| CrashReportView {
+                crash_type: report.crash_type,
+                headline: report.headline,
+                stack_trace: report.stack_trace,
+                first_seq,
+                last_seq,
+                timestamp: report.timestamp,
+                pid: report.pid,
+                tag: if report.tag.is_empty() {
+                    None
+                } else {
+                    Some(report.tag)
+                },
+            })
+            .collect();
+
+        let total_count = crashes.len();
+        crashes.truncate(limit);
+
+        Ok(GetCrashesResponse {
+            crashes,
+            total_count,
+        })
+    }
+
     fn into_stopped_response(self, reason: &str) -> StopCaptureResponse {
         self.shared.finish(reason);
         let mut capture = self.snapshot();
@@ -983,6 +1539,7 @@ struct CaptureShared {
     started_at_ms: u64,
     buffer: Mutex<LogBuffer>,
     stats: Mutex<CaptureStats>,
+    watches: Mutex<crate::watch::WatchSet>,
 }
 
 impl CaptureShared {
@@ -1003,6 +1560,7 @@ impl CaptureShared {
             started_at_ms: now_epoch_ms(),
             buffer: Mutex::new(LogBuffer::new(capacity)),
             stats: Mutex::new(CaptureStats::default()),
+            watches: Mutex::new(crate::watch::WatchSet::new()),
         }
     }
 
@@ -1026,6 +1584,11 @@ impl CaptureShared {
     fn query(&self, query: &LogQuery) -> LogPage {
         let buffer = lock_recover(&self.buffer);
         buffer.query(query)
+    }
+
+    fn detect_crashes(&self) -> Vec<(catpane_core::CrashReport, u64, u64)> {
+        let buffer = lock_recover(&self.buffer);
+        buffer.detect_crashes()
     }
 
     fn mark_stop_requested(&self, reason: &str) {
@@ -1237,6 +1800,298 @@ fn get_status_tool() -> Tool {
     .with_description("Inspect registered captures, buffer usage, and optional connected-device state.")
 }
 
+fn list_packages_tool() -> Tool {
+    Tool::new(
+        TOOL_LIST_PACKAGES,
+        object_schema(
+            vec![
+                ("device", string_property("Connected Android device identifier. If omitted and exactly one device is available, that device is used automatically.")),
+            ],
+            &[],
+        ),
+    )
+    .with_description("List installed packages on a connected Android device.")
+}
+
+fn boot_simulator_tool() -> Tool {
+    Tool::new(
+        TOOL_BOOT_SIMULATOR,
+        object_schema(
+            vec![
+                ("udid", string_property("The UDID of the iOS simulator to boot.")),
+            ],
+            &["udid"],
+        ),
+    )
+    .with_description("Boot an iOS simulator by its UDID.")
+}
+
+fn connect_device_tool() -> Tool {
+    Tool::new(
+        TOOL_CONNECT_DEVICE,
+        object_schema(
+            vec![
+                ("host_port", string_property("The host:port address of the Android device to connect to.")),
+            ],
+            &["host_port"],
+        ),
+    )
+    .with_description("Connect to an Android device over TCP/IP for wireless debugging.")
+}
+
+fn disconnect_device_tool() -> Tool {
+    Tool::new(
+        TOOL_DISCONNECT_DEVICE,
+        object_schema(
+            vec![
+                ("device", string_property("The serial or host:port identifier of the Android device to disconnect.")),
+            ],
+            &["device"],
+        ),
+    )
+    .with_description("Disconnect a wirelessly connected Android device.")
+}
+
+fn pair_device_tool() -> Tool {
+    Tool::new(
+        TOOL_PAIR_DEVICE,
+        object_schema(
+            vec![
+                ("host_port", string_property("The host:port address shown on the Android device pairing screen.")),
+                ("code", string_property("The pairing code displayed on the Android device.")),
+            ],
+            &["host_port", "code"],
+        ),
+    )
+    .with_description("Pair with an Android device using a pairing code for wireless debugging.")
+}
+
+fn restart_adb_tool() -> Tool {
+    Tool::new(TOOL_RESTART_ADB, empty_object_schema())
+        .with_description("Kill and restart the ADB server.")
+}
+
+fn set_location_tool() -> Tool {
+    Tool::new(
+        TOOL_SET_LOCATION,
+        object_schema(
+            vec![
+                ("device", string_property("Connected device identifier. If omitted and exactly one device is available, that device is used.")),
+                ("latitude", float_property("GPS latitude in decimal degrees.")),
+                ("longitude", float_property("GPS longitude in decimal degrees.")),
+                ("altitude", float_property("Optional altitude in meters (Android emulators only).")),
+            ],
+            &["latitude", "longitude"],
+        ),
+    )
+    .with_description("Set the GPS location on an iOS simulator or Android emulator. Not supported on physical Android devices.")
+}
+
+fn clear_location_tool() -> Tool {
+    Tool::new(
+        TOOL_CLEAR_LOCATION,
+        object_schema(
+            vec![
+                ("device", string_property("Connected device identifier.")),
+            ],
+            &[],
+        ),
+    )
+    .with_description("Clear the spoofed GPS location on an iOS simulator, reverting to default behavior.")
+}
+
+fn get_crashes_tool() -> Tool {
+    Tool::new(
+        TOOL_GET_CRASHES,
+        object_schema(
+            vec![
+                ("captureId", string_property("Specific capture ID to query.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
+                ("limit", integer_property("Maximum number of crashes to return. Defaults to 10.")),
+                ("crashType", string_property("Filter by crash type: java_exception, native_crash, anr, ios_crash.")),
+                (
+                    "since",
+                    string_property(
+                        "Only return crashes at or after this threadtime timestamp: MM-DD HH:MM:SS.mmm.",
+                    ),
+                ),
+            ],
+            &[],
+        ),
+    )
+    .with_description("Detect crashes, exceptions, and ANRs in captured logs. Returns structured crash reports with stack traces.")
+}
+
+fn create_watch_tool() -> Tool {
+    Tool::new(
+        TOOL_CREATE_WATCH,
+        object_schema(
+            vec![
+                ("captureId", string_property("Specific capture ID to query.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
+                ("name", string_property("A human-readable name for this watch.")),
+                ("pattern", string_property("The text or regex pattern to match against log entries.")),
+                (
+                    "patternType",
+                    json!({
+                        "type": "string",
+                        "enum": ["text", "regex"],
+                        "description": "Pattern matching mode. \"text\" for case-insensitive substring match, \"regex\" for regular expression. Defaults to \"text\"."
+                    }),
+                ),
+                ("tag", string_property("Optional tag substring filter. Only entries whose tag contains this value (case-insensitive) are matched.")),
+                ("minLevel", string_property("Minimum log level filter. Accepts verbose/debug/info/warn/error/fatal or single-letter aliases.")),
+            ],
+            &["name", "pattern"],
+        ),
+    )
+    .with_description("Register a named pattern watch on a capture. The watch tracks log entries matching the pattern.")
+}
+
+fn list_watches_tool() -> Tool {
+    Tool::new(
+        TOOL_LIST_WATCHES,
+        object_schema(
+            vec![
+                ("captureId", string_property("Specific capture ID to query.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
+            ],
+            &[],
+        ),
+    )
+    .with_description("List all active watches on a capture.")
+}
+
+fn get_watch_matches_tool() -> Tool {
+    Tool::new(
+        TOOL_GET_WATCH_MATCHES,
+        object_schema(
+            vec![
+                ("captureId", string_property("Specific capture ID to query.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
+                ("watchId", string_property("The ID of the watch to query.")),
+                (
+                    "sinceSeq",
+                    integer_property("Only return entries with seq greater than this value. Use to poll for new matches."),
+                ),
+                (
+                    "limit",
+                    json!({
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": MAX_GET_LOGS_LIMIT,
+                        "description": format!("Maximum number of matching entries to return. Defaults to {DEFAULT_GET_LOGS_LIMIT}.")
+                    }),
+                ),
+            ],
+            &["watchId"],
+        ),
+    )
+    .with_description("Get log entries matching a watch pattern. Scans the capture buffer for matches.")
+}
+
+fn delete_watch_tool() -> Tool {
+    Tool::new(
+        TOOL_DELETE_WATCH,
+        object_schema(
+            vec![
+                ("captureId", string_property("Specific capture ID to query.")),
+                ("device", string_property("Resolve a capture by connected device identifier.")),
+                ("watchId", string_property("The ID of the watch to remove.")),
+            ],
+            &["watchId"],
+        ),
+    )
+    .with_description("Remove a watch from a capture.")
+}
+
+async fn handle_list_packages(args: ListPackagesArgs) -> Result<ListPackagesResponse, McpToolError> {
+    let device = resolve_connected_device(args.device).await?;
+    if device.platform != DevicePlatform::Android {
+        return Err(McpToolError::invalid_params(
+            "packages are only available for Android devices",
+        ));
+    }
+    let packages = catpane_core::adb::list_packages_strict(&device.id)
+        .await
+        .map_err(McpToolError::internal)?;
+    let count = packages.len();
+    Ok(ListPackagesResponse { packages, count })
+}
+
+async fn handle_boot_simulator(args: BootSimulatorArgs) -> Result<BootSimulatorResponse, McpToolError> {
+    let message = catpane_core::ios::boot_simulator(&args.udid)
+        .await
+        .map_err(McpToolError::internal)?;
+    Ok(BootSimulatorResponse { message })
+}
+
+async fn handle_connect_device(args: ConnectDeviceArgs) -> Result<ConnectDeviceResponse, McpToolError> {
+    let message = catpane_core::adb::connect_device(&args.host_port)
+        .await
+        .map_err(McpToolError::internal)?;
+    Ok(ConnectDeviceResponse { message })
+}
+
+async fn handle_disconnect_device(args: DisconnectDeviceArgs) -> Result<DisconnectDeviceResponse, McpToolError> {
+    let message = catpane_core::adb::disconnect_device(&args.device)
+        .await
+        .map_err(McpToolError::internal)?;
+    Ok(DisconnectDeviceResponse { message })
+}
+
+async fn handle_pair_device(args: PairDeviceArgs) -> Result<PairDeviceResponse, McpToolError> {
+    let message = catpane_core::adb::pair_device(&args.host_port, &args.code)
+        .await
+        .map_err(McpToolError::internal)?;
+    Ok(PairDeviceResponse { message })
+}
+
+async fn handle_restart_adb() -> Result<RestartAdbResponse, McpToolError> {
+    let message = catpane_core::adb::restart_server()
+        .await
+        .map_err(McpToolError::internal)?;
+    Ok(RestartAdbResponse { message })
+}
+
+async fn handle_set_location(args: SetLocationArgs) -> Result<SetLocationResponse, McpToolError> {
+    let device = resolve_connected_device(args.device).await?;
+    let message = match device.platform {
+        DevicePlatform::IosSimulator => {
+            catpane_core::ios::set_simulator_location(&device.id, args.latitude, args.longitude)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+        DevicePlatform::Android => {
+            if !catpane_core::adb::is_emulator(&device.id) {
+                return Err(McpToolError::invalid_params(format!(
+                    "Location spoofing is only supported on Android emulators, not physical device '{}'. Use a mock location app instead.",
+                    device.id
+                )));
+            }
+            catpane_core::adb::set_emulator_location(&device.id, args.latitude, args.longitude, args.altitude)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+    };
+    Ok(SetLocationResponse { message })
+}
+
+async fn handle_clear_location(args: ClearLocationArgs) -> Result<ClearLocationResponse, McpToolError> {
+    let device = resolve_connected_device(args.device).await?;
+    match device.platform {
+        DevicePlatform::IosSimulator => {
+            let message = catpane_core::ios::clear_simulator_location(&device.id)
+                .await
+                .map_err(McpToolError::internal)?;
+            Ok(ClearLocationResponse { message })
+        }
+        DevicePlatform::Android => Err(McpToolError::invalid_params(
+            "Clearing spoofed location is only supported on iOS simulators. For Android emulators, set a new location or restart the emulator.",
+        )),
+    }
+}
+
 fn empty_object_schema() -> JsonSchema {
     JsonSchema::new(json!({
         "type": "object",
@@ -1281,6 +2136,13 @@ fn integer_property(description: &str) -> Value {
     })
 }
 
+fn float_property(description: &str) -> Value {
+    json!({
+        "type": "number",
+        "description": description,
+    })
+}
+
 fn parse_arguments<T>(params: &CallToolParams) -> Result<T, McpToolError>
 where
     T: DeserializeOwned,
@@ -1301,6 +2163,18 @@ fn parse_log_level(input: &str) -> Result<LogLevel, McpToolError> {
         "f" | "fatal" => Ok(LogLevel::Fatal),
         _ => Err(McpToolError::invalid_params(format!(
             "unsupported log level `{input}`"
+        ))),
+    }
+}
+
+fn parse_crash_type(input: &str) -> Result<catpane_core::CrashType, McpToolError> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "java_exception" => Ok(catpane_core::CrashType::JavaException),
+        "native_crash" => Ok(catpane_core::CrashType::NativeCrash),
+        "anr" => Ok(catpane_core::CrashType::Anr),
+        "ios_crash" => Ok(catpane_core::CrashType::IosCrash),
+        _ => Err(McpToolError::invalid_params(format!(
+            "unsupported crash type `{input}`; expected java_exception, native_crash, anr, or ios_crash"
         ))),
     }
 }
