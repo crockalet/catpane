@@ -160,10 +160,10 @@ fn draw_sidebar_rail(ui: &mut Ui, app: &mut App, sidebar_open: bool) {
     ui.add_space(8.0);
 
     let tabs: &[(SidebarTab, &str, &str)] = &[
-        (SidebarTab::Devices, "📱", "Devices"),
-        (SidebarTab::Location, "📍", "Location"),
-        (SidebarTab::Crashes, "🔴", "Crashes"),
-        (SidebarTab::Watches, "👁", "Watches"),
+        (SidebarTab::Devices, egui_phosphor::regular::DEVICE_MOBILE, "Devices"),
+        (SidebarTab::Location, egui_phosphor::regular::MAP_PIN, "Location"),
+        (SidebarTab::Crashes, egui_phosphor::regular::WARNING_CIRCLE, "Crashes"),
+        (SidebarTab::Watches, egui_phosphor::regular::EYE, "Watches"),
     ];
 
     for &(tab, icon, tooltip) in tabs {
@@ -211,7 +211,7 @@ fn draw_sidebar_contents(ui: &mut Ui, app: &mut App) {
         ui.heading(tab_heading(app.sidebar_tab));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .small_button("⮜")
+                .small_button(egui_phosphor::regular::CARET_LEFT)
                 .on_hover_text("Collapse sidebar")
                 .clicked()
             {
@@ -293,22 +293,22 @@ fn draw_tab_bar(ui: &mut Ui, app: &mut App) {
         .unwrap_or(0);
 
     let tabs: Vec<(SidebarTab, String)> = vec![
-        (SidebarTab::Devices, "📱 Devices".to_string()),
-        (SidebarTab::Location, "📍 Location".to_string()),
+        (SidebarTab::Devices, format!("{} Devices", egui_phosphor::regular::DEVICE_MOBILE)),
+        (SidebarTab::Location, format!("{} Location", egui_phosphor::regular::MAP_PIN)),
         (
             SidebarTab::Crashes,
             if crash_count > 0 {
-                format!("🔴 {crash_count}")
+                format!("{} {crash_count}", egui_phosphor::regular::WARNING_CIRCLE)
             } else {
-                "🔴 Crashes".to_string()
+                format!("{} Crashes", egui_phosphor::regular::WARNING_CIRCLE)
             },
         ),
         (
             SidebarTab::Watches,
             if watch_count > 0 {
-                format!("👁 {watch_count}")
+                format!("{} {watch_count}", egui_phosphor::regular::EYE)
             } else {
-                "👁 Watches".to_string()
+                format!("{} Watches", egui_phosphor::regular::EYE)
             },
         ),
     ];
@@ -1020,7 +1020,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                 }
             }
 
-            if status.is_some() && ui.small_button("✕").clicked() {
+            if status.is_some() && ui.small_button(egui_phosphor::regular::CROSS).clicked() {
                 if let Some(state) = app.device_locations.get_mut(dev_id) {
                     state.status = None;
                 }
@@ -1102,7 +1102,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                         .size(11.0),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Delete").clicked() {
+                    if ui.small_button(egui_phosphor::regular::CROSS).on_hover_text("Delete").clicked() {
                         to_delete = Some(i);
                     }
                     if ui.small_button("Use").clicked() {
@@ -1154,7 +1154,7 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
 
     let count = crash_reports.len();
     ui.label(
-        RichText::new(format!("🔴 Crashes ({count})"))
+        RichText::new(format!("{} Crashes ({count})", egui_phosphor::regular::WARNING_CIRCLE))
             .strong()
             .size(13.0),
     );
@@ -1191,7 +1191,11 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
             // Expandable detail
             let is_expanded = app.expanded_crashes.contains(&original_idx);
             ui.horizontal(|ui| {
-                let toggle_text = if is_expanded { "▾ Hide details" } else { "▸ Show details" };
+                let toggle_text = if is_expanded {
+                    format!("{} Hide details", egui_phosphor::regular::CARET_DOWN)
+                } else {
+                    format!("{} Show details", egui_phosphor::regular::CARET_RIGHT)
+                };
                 if ui.small_button(toggle_text).clicked() {
                     if is_expanded {
                         app.expanded_crashes.remove(&original_idx);
@@ -1201,7 +1205,7 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
                 }
 
                 // Copy button
-                if ui.small_button("📋 Copy").clicked() {
+                if ui.small_button(format!("{} Copy", egui_phosphor::regular::COPY)).clicked() {
                     let mut text = format!("[{}] {}\n{}\n", type_label, report.timestamp, report.headline);
                     // Gather context lines from pane entries
                     if let Some(pane) = app.panes.get(&app.focused_pane) {
@@ -1335,7 +1339,7 @@ fn draw_watches_tab(ui: &mut Ui, app: &mut App) {
                 RichText::new(format!("{} ({})", watch.name, watch.match_count)).size(12.0),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("✕").on_hover_text("Remove watch").clicked() {
+                if ui.small_button(egui_phosphor::regular::CROSS).on_hover_text("Remove watch").clicked() {
                     watch_to_remove = Some(i);
                 }
             });

@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 catpane-core = { path = "../catpane-core", features = ["egui"] }
 egui = "0.31"
+egui-phosphor = "0.9.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

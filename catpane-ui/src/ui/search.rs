@@ -27,7 +27,7 @@ pub fn draw_search_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
     search_frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.set_height(26.0);
-            ui.label(RichText::new("🔍").size(14.0));
+            ui.label(RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).size(14.0));
 
             let search_resp = ui.add(
                 egui::TextEdit::singleline(&mut pane.search_input)
@@ -70,13 +70,13 @@ pub fn draw_search_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                         .color(OD_FG_DIM)
                         .size(12.0),
                 );
-                if ui.small_button("▲").clicked() {
+                if ui.small_button(egui_phosphor::regular::CARET_UP).clicked() {
                     if let Some(fi) = pane.search_prev() {
                         pane.scroll_to_fi = Some(fi);
                         pane.auto_scroll = false;
                     }
                 }
-                if ui.small_button("▼").clicked() {
+                if ui.small_button(egui_phosphor::regular::CARET_DOWN).clicked() {
                     if let Some(fi) = pane.search_next() {
                         pane.scroll_to_fi = Some(fi);
                         pane.auto_scroll = false;
@@ -86,7 +86,7 @@ pub fn draw_search_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 ui.label(RichText::new("no matches").color(OD_RED).size(12.0));
             }
 
-            if ui.small_button("✕").clicked() {
+            if ui.small_button(egui_phosphor::regular::CROSS).clicked() {
                 pane.search_open = false;
                 pane.search_input.clear();
                 pane.filter.set_search("");

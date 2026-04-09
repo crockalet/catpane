@@ -57,6 +57,7 @@ pub fn configure_fonts(ctx: &egui::Context, is_dark: bool) {
         .entry(FontFamily::Proportional)
         .or_default()
         .insert(0, "JetBrainsMono".to_owned());
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
 
     let mut visuals = if is_dark {

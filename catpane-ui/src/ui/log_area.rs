@@ -19,6 +19,10 @@ struct TagAction {
 // In wrap mode, render at most this many rows (most recent) for performance.
 const MAX_WRAP_ROWS: usize = 5_000;
 
+fn clamp_offset(y: f32) -> f32 {
+    if y.is_finite() && y >= 0.0 { y } else { 0.0 }
+}
+
 pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
     let pane = match app.panes.get_mut(&pane_id) {
         Some(p) => p,
@@ -43,7 +47,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
     let wants_scroll_to_bottom = pane.scroll_to_bottom;
     pane.scroll_to_bottom = false;
     let scroll_to_fi = pane.scroll_to_fi.take();
-    let stored_offset = pane.scroll_offset_y;
+    let stored_offset = clamp_offset(pane.scroll_offset_y);
 
     let tag_color = if is_dark { OD_BLUE } else { OL_BLUE };
     let ts_color = if is_dark { OD_FG_DIM } else { OL_FG_DIM };
@@ -55,15 +59,13 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
         // ── Wrap mode: variable-height rows via LayoutJob ──────────────────
         let wrap_start = total_rows.saturating_sub(MAX_WRAP_ROWS);
 
-        let mut target_offset = stored_offset;
-        if scroll_to_fi.is_none() && wants_scroll_to_bottom {
-            target_offset = f32::MAX;
-        }
+        let target_offset = stored_offset;
+        let stick = scroll_to_fi.is_none() && wants_scroll_to_bottom;
 
         let scroll_area = ScrollArea::vertical()
             .id_salt("log_scroll_wrap")
             .auto_shrink([false, false])
-            .stick_to_bottom(false)
+            .stick_to_bottom(stick)
             .animated(false)
             .vertical_scroll_offset(target_offset);
 
@@ -187,7 +189,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 });
             }
         });
-        pane.scroll_offset_y = output.state.offset.y;
+        pane.scroll_offset_y = clamp_offset(output.state.offset.y);
     } else {
         // ── No-wrap mode: fixed-height virtualized rows ─────────────────────
         let mut target_offset = stored_offset;
@@ -341,7 +343,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 });
             }
         });
-        pane.scroll_offset_y = output.state.offset.y;
+        pane.scroll_offset_y = clamp_offset(output.state.offset.y);
     }
 
     // Detect user scrolling away from bottom
@@ -405,7 +407,7 @@ fn build_context_menu(
         if hi > lo {
             let count = hi - lo + 1;
             if ui
-                .button(format!("📋 Copy {} selected lines", count))
+                .button(format!("{} Copy {} selected lines", egui_phosphor::regular::COPY, count))
                 .clicked()
             {
                 let lines: Vec<String> = (lo..=hi)
@@ -430,11 +432,11 @@ fn build_context_menu(
             ui.separator();
         }
     }
-    if ui.button("📋 Copy line").clicked() {
+    if ui.button(format!("{} Copy line", egui_phosphor::regular::COPY)).clicked() {
         ui.ctx().copy_text(entry_line.to_string());
         ui.close_menu();
     }
-    if ui.button("📋 Copy message").clicked() {
+    if ui.button(format!("{} Copy message", egui_phosphor::regular::COPY)).clicked() {
         ui.ctx().copy_text(entry_msg.to_string());
         ui.close_menu();
     }

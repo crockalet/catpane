@@ -41,7 +41,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 .and_then(|device_id| app.devices.iter().find(|device| device.id == *device_id))
                 .cloned();
 
-            ui.label(RichText::new("📱").size(14.0));
+            ui.label(RichText::new(egui_phosphor::regular::DEVICE_MOBILE).size(14.0));
             egui::ComboBox::from_id_salt("device_combo")
                 .selected_text(&device_label)
                 .width(180.0)
@@ -56,7 +56,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                         }
                     }
                     ui.separator();
-                    if ui.button("↻ Refresh devices").clicked() {
+                    if ui.button(format!("{} Refresh devices", egui_phosphor::regular::ARROW_CLOCKWISE)).clicked() {
                         app.device_refresh_pending = true;
                     }
                 });
@@ -67,7 +67,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 .as_ref()
                 .is_some_and(|device| device.supports_package_filter())
             {
-                ui.label(RichText::new("📦").size(14.0));
+                ui.label(RichText::new(egui_phosphor::regular::PACKAGE).size(14.0));
                 let pkg_hint = pane.filter.package.as_deref().unwrap_or("Package...");
                 let pkg_resp = ui.add(
                     egui::TextEdit::singleline(&mut pane.package_filter_text)
@@ -155,7 +155,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                                 if ui
                                     .selectable_label(
                                         false,
-                                        RichText::new("✕ Clear filter").color(OD_FG_DIM),
+                                        RichText::new(format!("{} Clear filter", egui_phosphor::regular::CROSS)).color(OD_FG_DIM),
                                     )
                                     .clicked()
                                 {
@@ -208,7 +208,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 .as_ref()
                 .is_some_and(|device| device.supports_ios_filters())
             {
-                ui.label(RichText::new("⚙").size(14.0));
+                ui.label(RichText::new(egui_phosphor::regular::GEAR).size(14.0));
                 let process_resp = ui.add(
                     egui::TextEdit::singleline(&mut pane.ios_process_filter_text)
                         .desired_width(120.0)
@@ -281,7 +281,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             };
             if ui
                 .add(egui::Button::new(
-                    RichText::new("⤓").size(15.0).color(follow_color),
+                    RichText::new(egui_phosphor::regular::ARROW_LINE_DOWN).size(15.0).color(follow_color),
                 ))
                 .on_hover_text(if pane.auto_scroll {
                     "Following logs (click to stop)"
@@ -306,7 +306,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             };
             if ui
                 .add(egui::Button::new(
-                    RichText::new("⏎").size(15.0).color(wrap_color),
+                    RichText::new(egui_phosphor::regular::KEY_RETURN).size(15.0).color(wrap_color),
                 ))
                 .on_hover_text(if pane.word_wrap {
                     "Word wrap on (click to disable)"
@@ -316,13 +316,18 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 .clicked()
             {
                 pane.word_wrap = !pane.word_wrap;
+                // Reset scroll state — the offset from one mode is invalid for the other
+                // (wrap mode has variable-height rows with a 5k cap; no-wrap uses fixed-height
+                // virtualized rows over the full entry set).
+                pane.scroll_to_bottom = true;
+                pane.scroll_offset_y = 0.0;
             }
 
             // Pause / resume
             let pause_icon = if pane.paused {
-                RichText::new("▶").size(15.0).color(OD_GREEN)
+                RichText::new(egui_phosphor::regular::PLAY).size(15.0).color(OD_GREEN)
             } else {
-                RichText::new("⏸").size(15.0)
+                RichText::new(egui_phosphor::regular::PAUSE).size(15.0)
             };
             if ui
                 .add(egui::Button::new(pause_icon))
@@ -334,7 +339,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
 
             // Clear
             if ui
-                .add(egui::Button::new(RichText::new("🗑").size(15.0)))
+                .add(egui::Button::new(RichText::new(egui_phosphor::regular::TRASH).size(15.0)))
                 .on_hover_text("Clear logs")
                 .clicked()
             {
@@ -369,7 +374,7 @@ pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             ui.set_height(24.0);
             ui.spacing_mut().item_spacing.x = 6.0;
 
-            ui.label(RichText::new("🏷").size(13.0));
+            ui.label(RichText::new(egui_phosphor::regular::TAG).size(13.0));
 
             let (mut tag_input, has_filters, seen_tags) = {
                 let pane = match app.panes.get(&pane_id) {
@@ -501,7 +506,7 @@ pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             // History dropdown
             let history_popup_id = ui.id().with("tag_history_popup");
             let history_btn = ui
-                .button(RichText::new("▾").size(13.0))
+                .button(RichText::new(egui_phosphor::regular::CARET_DOWN).size(13.0))
                 .on_hover_text("Tag history");
             if history_btn.clicked() {
                 ui.memory_mut(|m| m.toggle_popup(history_popup_id));
@@ -532,7 +537,7 @@ pub fn draw_tag_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             let show_clear = !tag_input.is_empty() || has_filters;
             if show_clear {
                 if ui
-                    .small_button(RichText::new("✕").size(12.0))
+                    .small_button(RichText::new(egui_phosphor::regular::CROSS).size(12.0))
                     .on_hover_text("Clear tag filters")
                     .clicked()
                 {
