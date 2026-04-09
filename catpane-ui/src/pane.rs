@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use catpane_core::crash_detector::{CrashReport, detect_crashes};
+use catpane_core::crash_detector::{CrashDetector, CrashReport, CrashType, detect_crashes};
 use catpane_core::filter::Filter;
 use catpane_core::log_buffer_config::log_buffer_capacity;
 use catpane_core::log_entry::LogEntry;
@@ -22,22 +22,38 @@ pub const WATCH_COLORS: &[(u8, u8, u8)] = &[
 pub struct UiWatch {
     pub name: String,
     pub pattern: String,
+    pub pattern_lower: String,
     pub color_index: usize,
     pub match_count: usize,
 }
 
 impl UiWatch {
     pub fn matches(&self, entry: &LogEntry) -> bool {
-        let pat = self.pattern.to_lowercase();
-        let msg = entry.message.to_lowercase();
-        if msg.contains(&pat) {
+        let pat = &self.pattern_lower;
+        let msg = entry.message.to_ascii_lowercase();
+        if msg.contains(pat.as_str()) {
             return true;
         }
-        if entry.tag.to_lowercase().contains(&pat) {
+        if entry.tag.to_ascii_lowercase().contains(pat.as_str()) {
             return true;
         }
         false
     }
+}
+
+const SAVED_CRASH_CAP: usize = 100;
+const CRASH_CONTEXT_BEFORE: usize = 10;
+const CRASH_CONTEXT_AFTER: usize = 5;
+
+#[derive(Clone)]
+pub struct SavedCrash {
+    pub crash_type: CrashType,
+    pub summary: String,
+    pub timestamp: String,
+    pub pid: u32,
+    pub context_lines: Vec<LogEntry>,
+    pub crash_start_offset: usize,
+    pub crash_end_offset: usize,
 }
 
 pub type PaneId = u64;
@@ -216,6 +232,12 @@ pub struct Pane {
     pub watch_input: String,
     /// entry_index -> color_index for highlighted watch matches
     pub watch_highlights: HashMap<usize, usize>,
+    /// Filtered index count at last incremental watch scan
+    last_watch_scanned_count: usize,
+    /// Incremental crash detector (avoids full rescan each frame)
+    crash_detector: CrashDetector,
+    /// Crash logs with surrounding context that survive clear()
+    pub saved_crashes: Vec<SavedCrash>,
 }
 
 impl Pane {
@@ -274,6 +296,9 @@ impl Pane {
             watches: Vec::new(),
             watch_input: String::new(),
             watch_highlights: HashMap::new(),
+            last_watch_scanned_count: 0,
+            crash_detector: CrashDetector::new(),
+            saved_crashes: Vec::new(),
         }
     }
 
@@ -287,6 +312,7 @@ impl Pane {
 
         let mut added = false;
         let mut channel_dead = false;
+        let mut new_crash_reports: Vec<CrashReport> = Vec::new();
         if let Some(ref mut rx) = self.capture_rx {
             for _ in 0..500 {
                 match rx.try_recv() {
@@ -296,6 +322,10 @@ impl Pane {
                         }
                         let idx = self.entries.len();
                         let passes = self.filter.matches(&entry, self.pid_filter);
+                        // Feed to crash detector before pushing (avoids borrow conflict)
+                        if let Some(report) = self.crash_detector.feed(idx, &entry) {
+                            new_crash_reports.push(report);
+                        }
                         self.entries.push(entry);
                         if passes {
                             self.filtered_indices.push(idx);
@@ -312,6 +342,11 @@ impl Pane {
             }
         }
 
+        // Flush any pending partial crash at end of batch
+        if let Some(report) = self.crash_detector.flush() {
+            new_crash_reports.push(report);
+        }
+
         // Capture process exited — drop the dead handle so the update loop
         // can detect this and restart when the device is available.
         if channel_dead {
@@ -322,15 +357,22 @@ impl Pane {
             self.scroll_to_bottom = true;
         }
 
-        if added {
-            self.rebuild_crashes();
+        // Incrementally append new crash reports and update indices
+        if !new_crash_reports.is_empty() {
+            for report in &new_crash_reports {
+                for i in report.first_index..=report.last_index {
+                    self.crash_line_indices.insert(i);
+                }
+            }
+            // Save crashes with surrounding context
+            self.save_crashes(&new_crash_reports);
+            self.crash_reports.extend(new_crash_reports);
         }
 
         // Incrementally update watch highlights for newly ingested entries
         if added && !self.watches.is_empty() {
-            // Check only newly added filtered entries
-            let fi_start = self.filtered_indices.len().saturating_sub(500);
-            for &entry_idx in &self.filtered_indices[fi_start..] {
+            let scan_start = self.last_watch_scanned_count;
+            for &entry_idx in &self.filtered_indices[scan_start..] {
                 if self.watch_highlights.contains_key(&entry_idx) {
                     continue;
                 }
@@ -344,6 +386,9 @@ impl Pane {
                     }
                 }
             }
+        }
+        if added {
+            self.last_watch_scanned_count = self.filtered_indices.len();
         }
 
         let capacity = log_buffer_capacity();
@@ -361,6 +406,16 @@ impl Pane {
         let scroll_to_bottom = self.scroll_to_bottom;
         self.entries.drain(0..drain_count);
         self.rebuild_filtered();
+        // Full rebuild of crash state after compaction shifts indices
+        self.crash_detector = CrashDetector::new();
+        self.crash_reports = detect_crashes(&self.entries);
+        self.crash_line_indices.clear();
+        for report in &self.crash_reports {
+            for i in report.first_index..=report.last_index {
+                self.crash_line_indices.insert(i);
+            }
+        }
+        self.crash_nav_index = None;
         self.scroll_to_bottom = scroll_to_bottom;
     }
 
@@ -422,10 +477,13 @@ impl Pane {
         self.crash_line_indices.clear();
         self.crash_reports.clear();
         self.crash_nav_index = None;
+        self.crash_detector = CrashDetector::new();
         self.watch_highlights.clear();
+        self.last_watch_scanned_count = 0;
         for watch in &mut self.watches {
             watch.match_count = 0;
         }
+        // Note: saved_crashes intentionally NOT cleared
     }
 
     pub fn apply_tag_filter(&mut self) {
@@ -452,8 +510,9 @@ impl Pane {
         self.capture_device_id = None;
     }
 
-    /// Re-run crash detection on current entries.
+    /// Re-run crash detection on current entries (full rebuild).
     pub fn rebuild_crashes(&mut self) {
+        self.crash_detector = CrashDetector::new();
         self.crash_reports = detect_crashes(&self.entries);
         self.crash_line_indices.clear();
         for report in &self.crash_reports {
@@ -461,6 +520,7 @@ impl Pane {
                 self.crash_line_indices.insert(i);
             }
         }
+        self.crash_nav_index = None;
     }
 
     /// Navigate to the next crash. Returns the filtered_index to scroll to, if any.
@@ -493,9 +553,11 @@ impl Pane {
 
     pub fn add_watch(&mut self, name: String, pattern: String) {
         let color_index = self.watches.len() % WATCH_COLORS.len();
+        let pattern_lower = pattern.to_ascii_lowercase();
         self.watches.push(UiWatch {
             name,
             pattern,
+            pattern_lower,
             color_index,
             match_count: 0,
         });
@@ -524,6 +586,38 @@ impl Pane {
                     }
                 }
             }
+        }
+        self.last_watch_scanned_count = self.filtered_indices.len();
+    }
+
+    fn save_crashes(&mut self, reports: &[CrashReport]) {
+        for report in reports {
+            let first = report.first_index;
+            let last = report.last_index;
+            let ctx_start = first.saturating_sub(CRASH_CONTEXT_BEFORE);
+            let ctx_end = (last + CRASH_CONTEXT_AFTER + 1).min(self.entries.len());
+            let context_lines: Vec<LogEntry> = self.entries[ctx_start..ctx_end]
+                .iter()
+                .cloned()
+                .collect();
+            let crash_start_offset = first - ctx_start;
+            let crash_end_offset = last - ctx_start;
+
+            self.saved_crashes.push(SavedCrash {
+                crash_type: report.crash_type,
+                summary: report.headline.clone(),
+                timestamp: report.timestamp.clone(),
+                pid: report.pid.unwrap_or(0),
+                context_lines,
+                crash_start_offset,
+                crash_end_offset,
+            });
+        }
+
+        // Cap at SAVED_CRASH_CAP, dropping oldest
+        if self.saved_crashes.len() > SAVED_CRASH_CAP {
+            let excess = self.saved_crashes.len() - SAVED_CRASH_CAP;
+            self.saved_crashes.drain(0..excess);
         }
     }
 }

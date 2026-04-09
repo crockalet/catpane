@@ -2,7 +2,7 @@ use egui::{self, Key, RichText, ScrollArea, Ui};
 
 use super::theme::*;
 use crate::app::App;
-use crate::pane::{PaneId, WATCH_COLORS};
+use crate::pane::PaneId;
 use catpane_core::log_entry::LogLevel;
 
 pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
@@ -341,77 +341,7 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 pane.clear();
             }
 
-            // Crash indicator
-            let crash_count = pane.crash_reports.len();
-            if crash_count > 0 {
-                ui.separator();
 
-                if ui
-                    .add(egui::Button::new(RichText::new("◀").size(12.0)))
-                    .on_hover_text("Previous crash")
-                    .clicked()
-                {
-                    if let Some(fi) = pane.prev_crash() {
-                        pane.scroll_to_fi = Some(fi);
-                        pane.auto_scroll = false;
-                    }
-                }
-
-                let badge_text = format!("🔴 {}", crash_count);
-                ui.colored_label(
-                    if is_dark { OD_RED } else { OL_RED },
-                    RichText::new(badge_text).size(12.0),
-                );
-
-                if ui
-                    .add(egui::Button::new(RichText::new("▶").size(12.0)))
-                    .on_hover_text("Next crash")
-                    .clicked()
-                {
-                    if let Some(fi) = pane.next_crash() {
-                        pane.scroll_to_fi = Some(fi);
-                        pane.auto_scroll = false;
-                    }
-                }
-            }
-
-            // Watch controls
-            ui.separator();
-
-            let watch_response = ui.add(
-                egui::TextEdit::singleline(&mut pane.watch_input)
-                    .desired_width(100.0)
-                    .hint_text("Watch pattern…")
-                    .id(ui.id().with("watch_input")),
-            );
-            let enter_pressed = watch_response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let add_clicked = ui
-                .small_button(RichText::new("👁 Add").size(11.0))
-                .clicked();
-            if enter_pressed || add_clicked {
-                let pattern = pane.watch_input.trim().to_string();
-                if !pattern.is_empty() {
-                    let name = pattern.clone();
-                    pane.add_watch(name, pattern);
-                    pane.watch_input.clear();
-                }
-            }
-
-            // Show active watches with colored badges
-            let mut watch_to_remove: Option<usize> = None;
-            for i in 0..pane.watches.len() {
-                let watch = &pane.watches[i];
-                let (r, g, b) = WATCH_COLORS[watch.color_index % WATCH_COLORS.len()];
-                let color = egui::Color32::from_rgb(r, g, b);
-                ui.colored_label(color, format!("● {} ({})", watch.name, watch.match_count));
-                if ui.small_button("✕").clicked() {
-                    watch_to_remove = Some(i);
-                }
-            }
-            if let Some(idx) = watch_to_remove {
-                pane.remove_watch(idx);
-            }
         });
     });
 
