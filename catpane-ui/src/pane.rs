@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+use catpane_core::crash_detector::{CrashReport, detect_crashes};
 use catpane_core::filter::Filter;
 use catpane_core::log_buffer_config::log_buffer_capacity;
 use catpane_core::log_entry::LogEntry;
@@ -170,6 +173,12 @@ pub struct Pane {
     pub scroll_offset_y: f32,
     // Cooldown for auto-restart of dead logcat (avoid rapid-fire respawn loops)
     pub last_capture_restart: std::time::Instant,
+    /// Indices into `entries` that are part of a crash (for highlighting)
+    pub crash_line_indices: HashSet<usize>,
+    /// Crash reports detected in current entries
+    pub crash_reports: Vec<CrashReport>,
+    /// Current crash navigation index (into crash_reports)
+    pub crash_nav_index: Option<usize>,
 }
 
 impl Pane {
@@ -222,6 +231,9 @@ impl Pane {
             word_wrap: default_word_wrap(),
             scroll_offset_y: 0.0,
             last_capture_restart: std::time::Instant::now(),
+            crash_line_indices: HashSet::new(),
+            crash_reports: Vec::new(),
+            crash_nav_index: None,
         }
     }
 
@@ -268,6 +280,10 @@ impl Pane {
 
         if added && self.auto_scroll {
             self.scroll_to_bottom = true;
+        }
+
+        if added {
+            self.rebuild_crashes();
         }
 
         let capacity = log_buffer_capacity();
@@ -342,6 +358,9 @@ impl Pane {
         self.entries.clear();
         self.filtered_indices.clear();
         self.search_match_indices.clear();
+        self.crash_line_indices.clear();
+        self.crash_reports.clear();
+        self.crash_nav_index = None;
     }
 
     pub fn apply_tag_filter(&mut self) {
@@ -366,6 +385,45 @@ impl Pane {
     pub fn stop_capture(&mut self) {
         self.capture_rx = None;
         self.capture_device_id = None;
+    }
+
+    /// Re-run crash detection on current entries.
+    pub fn rebuild_crashes(&mut self) {
+        self.crash_reports = detect_crashes(&self.entries);
+        self.crash_line_indices.clear();
+        for report in &self.crash_reports {
+            for i in report.first_index..=report.last_index {
+                self.crash_line_indices.insert(i);
+            }
+        }
+    }
+
+    /// Navigate to the next crash. Returns the filtered_index to scroll to, if any.
+    pub fn next_crash(&mut self) -> Option<usize> {
+        if self.crash_reports.is_empty() {
+            return None;
+        }
+        let idx = match self.crash_nav_index {
+            Some(i) => (i + 1) % self.crash_reports.len(),
+            None => 0,
+        };
+        self.crash_nav_index = Some(idx);
+        let entry_idx = self.crash_reports[idx].first_index;
+        self.filtered_indices.iter().position(|&fi| fi >= entry_idx)
+    }
+
+    /// Navigate to the previous crash.
+    pub fn prev_crash(&mut self) -> Option<usize> {
+        if self.crash_reports.is_empty() {
+            return None;
+        }
+        let idx = match self.crash_nav_index {
+            Some(0) | None => self.crash_reports.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.crash_nav_index = Some(idx);
+        let entry_idx = self.crash_reports[idx].first_index;
+        self.filtered_indices.iter().position(|&fi| fi >= entry_idx)
     }
 }
 

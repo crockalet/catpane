@@ -92,6 +92,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 let is_search_current = search_highlight_fi == Some(fi);
                 let is_search_match = pane.search_open && pane.filter.matches_search(entry);
                 let is_selected = pane.is_row_selected(fi);
+                let is_crash_line = pane.crash_line_indices.contains(&ei);
 
                 let bg_color: Option<Color32> = if is_search_current {
                     Some(if is_dark {
@@ -106,6 +107,12 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                         Color32::from_rgb(50, 45, 20)
                     } else {
                         Color32::from_rgb(255, 250, 220)
+                    })
+                } else if is_crash_line {
+                    Some(if is_dark {
+                        Color32::from_rgba_premultiplied(255, 60, 60, 25)
+                    } else {
+                        Color32::from_rgba_premultiplied(255, 0, 0, 15)
                     })
                 } else {
                     None
@@ -213,6 +220,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 let is_search_current = search_highlight_fi == Some(fi);
                 let is_search_match = pane.search_open && pane.filter.matches_search(entry);
                 let is_selected = pane.is_row_selected(fi);
+                let is_crash_line = pane.crash_line_indices.contains(&ei);
 
                 let bg_color = if is_search_current {
                     Some(if is_dark {
@@ -227,6 +235,12 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                         Color32::from_rgb(50, 45, 20)
                     } else {
                         Color32::from_rgb(255, 250, 220)
+                    })
+                } else if is_crash_line {
+                    Some(if is_dark {
+                        Color32::from_rgba_premultiplied(255, 60, 60, 25)
+                    } else {
+                        Color32::from_rgba_premultiplied(255, 0, 0, 15)
                     })
                 } else {
                     None

@@ -340,6 +340,40 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             {
                 pane.clear();
             }
+
+            // Crash indicator
+            let crash_count = pane.crash_reports.len();
+            if crash_count > 0 {
+                ui.separator();
+
+                if ui
+                    .add(egui::Button::new(RichText::new("◀").size(12.0)))
+                    .on_hover_text("Previous crash")
+                    .clicked()
+                {
+                    if let Some(fi) = pane.prev_crash() {
+                        pane.scroll_to_fi = Some(fi);
+                        pane.auto_scroll = false;
+                    }
+                }
+
+                let badge_text = format!("🔴 {}", crash_count);
+                ui.colored_label(
+                    if is_dark { OD_RED } else { OL_RED },
+                    RichText::new(badge_text).size(12.0),
+                );
+
+                if ui
+                    .add(egui::Button::new(RichText::new("▶").size(12.0)))
+                    .on_hover_text("Next crash")
+                    .clicked()
+                {
+                    if let Some(fi) = pane.next_crash() {
+                        pane.scroll_to_fi = Some(fi);
+                        pane.auto_scroll = false;
+                    }
+                }
+            }
         });
     });
 
