@@ -2,7 +2,7 @@ use egui::{self, Color32, RichText, ScrollArea, Ui, Vec2};
 
 use super::theme::*;
 use crate::app::App;
-use crate::pane::PaneId;
+use crate::pane::{PaneId, WATCH_COLORS};
 
 enum TagActionKind {
     Include,
@@ -113,6 +113,13 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                         Color32::from_rgba_premultiplied(255, 60, 60, 25)
                     } else {
                         Color32::from_rgba_premultiplied(255, 0, 0, 15)
+                    })
+                } else if let Some(&ci) = pane.watch_highlights.get(&ei) {
+                    let (r, g, b) = WATCH_COLORS[ci % WATCH_COLORS.len()];
+                    Some(if is_dark {
+                        Color32::from_rgba_premultiplied(r, g, b, 25)
+                    } else {
+                        Color32::from_rgba_premultiplied(r, g, b, 20)
                     })
                 } else {
                     None
@@ -241,6 +248,13 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                         Color32::from_rgba_premultiplied(255, 60, 60, 25)
                     } else {
                         Color32::from_rgba_premultiplied(255, 0, 0, 15)
+                    })
+                } else if let Some(&ci) = pane.watch_highlights.get(&ei) {
+                    let (r, g, b) = WATCH_COLORS[ci % WATCH_COLORS.len()];
+                    Some(if is_dark {
+                        Color32::from_rgba_premultiplied(r, g, b, 25)
+                    } else {
+                        Color32::from_rgba_premultiplied(r, g, b, 20)
                     })
                 } else {
                     None

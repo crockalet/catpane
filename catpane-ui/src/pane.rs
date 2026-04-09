@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use catpane_core::crash_detector::{CrashReport, detect_crashes};
 use catpane_core::filter::Filter;
@@ -8,6 +8,37 @@ use tokio::sync::broadcast;
 
 const COMPACT_BATCH_DIVISOR: usize = 50;
 const MIN_COMPACT_BATCH_SIZE: usize = 250;
+
+pub const WATCH_COLORS: &[(u8, u8, u8)] = &[
+    (0, 180, 216),   // cyan
+    (255, 183, 77),  // orange
+    (129, 199, 132), // green
+    (186, 104, 200), // purple
+    (255, 138, 128), // coral
+    (100, 181, 246), // blue
+];
+
+#[derive(Clone)]
+pub struct UiWatch {
+    pub name: String,
+    pub pattern: String,
+    pub color_index: usize,
+    pub match_count: usize,
+}
+
+impl UiWatch {
+    pub fn matches(&self, entry: &LogEntry) -> bool {
+        let pat = self.pattern.to_lowercase();
+        let msg = entry.message.to_lowercase();
+        if msg.contains(&pat) {
+            return true;
+        }
+        if entry.tag.to_lowercase().contains(&pat) {
+            return true;
+        }
+        false
+    }
+}
 
 pub type PaneId = u64;
 
@@ -179,6 +210,12 @@ pub struct Pane {
     pub crash_reports: Vec<CrashReport>,
     /// Current crash navigation index (into crash_reports)
     pub crash_nav_index: Option<usize>,
+    /// Active log pattern watches
+    pub watches: Vec<UiWatch>,
+    /// Text field for new watch pattern input
+    pub watch_input: String,
+    /// entry_index -> color_index for highlighted watch matches
+    pub watch_highlights: HashMap<usize, usize>,
 }
 
 impl Pane {
@@ -234,6 +271,9 @@ impl Pane {
             crash_line_indices: HashSet::new(),
             crash_reports: Vec::new(),
             crash_nav_index: None,
+            watches: Vec::new(),
+            watch_input: String::new(),
+            watch_highlights: HashMap::new(),
         }
     }
 
@@ -286,6 +326,26 @@ impl Pane {
             self.rebuild_crashes();
         }
 
+        // Incrementally update watch highlights for newly ingested entries
+        if added && !self.watches.is_empty() {
+            // Check only newly added filtered entries
+            let fi_start = self.filtered_indices.len().saturating_sub(500);
+            for &entry_idx in &self.filtered_indices[fi_start..] {
+                if self.watch_highlights.contains_key(&entry_idx) {
+                    continue;
+                }
+                if let Some(entry) = self.entries.get(entry_idx) {
+                    for watch in self.watches.iter_mut() {
+                        if watch.matches(entry) {
+                            watch.match_count += 1;
+                            self.watch_highlights.insert(entry_idx, watch.color_index);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         let capacity = log_buffer_capacity();
         if self.entries.len() > compact_threshold(capacity) {
             self.compact();
@@ -318,6 +378,7 @@ impl Pane {
             }
         }
 
+        self.rebuild_watch_highlights();
         self.scroll_to_bottom = true;
     }
 
@@ -361,6 +422,10 @@ impl Pane {
         self.crash_line_indices.clear();
         self.crash_reports.clear();
         self.crash_nav_index = None;
+        self.watch_highlights.clear();
+        for watch in &mut self.watches {
+            watch.match_count = 0;
+        }
     }
 
     pub fn apply_tag_filter(&mut self) {
@@ -424,6 +489,42 @@ impl Pane {
         self.crash_nav_index = Some(idx);
         let entry_idx = self.crash_reports[idx].first_index;
         self.filtered_indices.iter().position(|&fi| fi >= entry_idx)
+    }
+
+    pub fn add_watch(&mut self, name: String, pattern: String) {
+        let color_index = self.watches.len() % WATCH_COLORS.len();
+        self.watches.push(UiWatch {
+            name,
+            pattern,
+            color_index,
+            match_count: 0,
+        });
+        self.rebuild_watch_highlights();
+    }
+
+    pub fn remove_watch(&mut self, index: usize) {
+        if index < self.watches.len() {
+            self.watches.remove(index);
+            self.rebuild_watch_highlights();
+        }
+    }
+
+    pub fn rebuild_watch_highlights(&mut self) {
+        self.watch_highlights.clear();
+        for watch in self.watches.iter_mut() {
+            watch.match_count = 0;
+        }
+        for &entry_idx in &self.filtered_indices {
+            if let Some(entry) = self.entries.get(entry_idx) {
+                for watch in self.watches.iter_mut() {
+                    if watch.matches(entry) {
+                        watch.match_count += 1;
+                        self.watch_highlights.insert(entry_idx, watch.color_index);
+                        break; // first matching watch wins for color
+                    }
+                }
+            }
+        }
     }
 }
 
