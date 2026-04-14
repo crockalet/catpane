@@ -2,7 +2,7 @@ use egui::{self, Color32, RichText, ScrollArea, Ui, Vec2};
 
 use super::theme::*;
 use crate::app::App;
-use crate::pane::{PaneId, WATCH_COLORS};
+use crate::pane::{Pane, PaneId, WATCH_COLORS};
 
 enum TagActionKind {
     Include,
@@ -18,9 +18,34 @@ struct TagAction {
 
 // In wrap mode, render at most this many rows (most recent) for performance.
 const MAX_WRAP_ROWS: usize = 5_000;
+const BOTTOM_EPSILON: f32 = 1.0;
 
 fn clamp_offset(y: f32) -> f32 {
     if y.is_finite() && y >= 0.0 { y } else { 0.0 }
+}
+
+fn max_vertical_offset(content_height: f32, viewport_height: f32) -> f32 {
+    (content_height - viewport_height).max(0.0)
+}
+
+fn is_at_bottom(offset_y: f32, max_offset_y: f32) -> bool {
+    max_offset_y <= BOTTOM_EPSILON || offset_y >= max_offset_y - BOTTOM_EPSILON
+}
+
+fn sync_follow_state(pane: &mut Pane, offset_y: f32, max_offset_y: f32, requested_follow: bool) {
+    let offset_y = if requested_follow {
+        max_offset_y
+    } else {
+        clamp_offset(offset_y)
+    };
+    pane.scroll_offset_y = offset_y;
+    if requested_follow {
+        pane.auto_scroll = true;
+        return;
+    }
+    if pane.auto_scroll && !is_at_bottom(offset_y, max_offset_y) {
+        pane.auto_scroll = false;
+    }
 }
 
 pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
@@ -48,6 +73,7 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
     pane.scroll_to_bottom = false;
     let scroll_to_fi = pane.scroll_to_fi.take();
     let stored_offset = clamp_offset(pane.scroll_offset_y);
+    let auto_scroll = pane.auto_scroll;
 
     let tag_color = if is_dark { OD_BLUE } else { OL_BLUE };
     let ts_color = if is_dark { OD_FG_DIM } else { OL_FG_DIM };
@@ -59,15 +85,14 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
         // ── Wrap mode: variable-height rows via LayoutJob ──────────────────
         let wrap_start = total_rows.saturating_sub(MAX_WRAP_ROWS);
 
-        let target_offset = stored_offset;
-        let stick = scroll_to_fi.is_none() && wants_scroll_to_bottom;
-
-        let scroll_area = ScrollArea::vertical()
+        let mut scroll_area = ScrollArea::vertical()
             .id_salt("log_scroll_wrap")
             .auto_shrink([false, false])
-            .stick_to_bottom(stick)
-            .animated(false)
-            .vertical_scroll_offset(target_offset);
+            .stick_to_bottom(auto_scroll)
+            .animated(false);
+        if scroll_to_fi.is_none() && !wants_scroll_to_bottom {
+            scroll_area = scroll_area.vertical_scroll_offset(stored_offset);
+        }
 
         let output = scroll_area.show(ui, |ui| {
             if wrap_start > 0 {
@@ -151,6 +176,8 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
 
                 if scroll_to_fi == Some(fi) {
                     row_resp.scroll_to_me(Some(egui::Align::Center));
+                } else if wants_scroll_to_bottom && fi + 1 == total_rows {
+                    row_resp.scroll_to_me(Some(egui::Align::BOTTOM));
                 }
 
                 if row_resp.clicked() {
@@ -189,7 +216,13 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 });
             }
         });
-        pane.scroll_offset_y = clamp_offset(output.state.offset.y);
+        let max_offset_y = max_vertical_offset(output.content_size.y, output.inner_rect.height());
+        sync_follow_state(
+            pane,
+            output.state.offset.y,
+            max_offset_y,
+            wants_scroll_to_bottom,
+        );
     } else {
         // ── No-wrap mode: fixed-height virtualized rows ─────────────────────
         let mut target_offset = stored_offset;
@@ -203,9 +236,10 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
             }
         } else if wants_scroll_to_bottom {
             let row_spacing = ui.spacing().item_spacing.y;
-            let content_height = total_rows as f32 * (LOG_ROW_HEIGHT + row_spacing);
-            let viewport_height = ui.available_height();
-            target_offset = (content_height - viewport_height).max(0.0);
+            target_offset = max_vertical_offset(
+                total_rows as f32 * (LOG_ROW_HEIGHT + row_spacing),
+                ui.available_height(),
+            );
         }
 
         let scroll_area = ScrollArea::vertical()
@@ -343,19 +377,13 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
                 });
             }
         });
-        pane.scroll_offset_y = clamp_offset(output.state.offset.y);
-    }
-
-    // Detect user scrolling away from bottom
-    {
-        let user_scrolled_up =
-            ui.input(|i| i.smooth_scroll_delta.y > 0.0 || i.raw_scroll_delta.y > 0.0);
-
-        if let Some(pane) = app.panes.get_mut(&pane_id) {
-            if user_scrolled_up && pane.auto_scroll {
-                pane.auto_scroll = false;
-            }
-        }
+        let max_offset_y = max_vertical_offset(output.content_size.y, output.inner_rect.height());
+        sync_follow_state(
+            pane,
+            output.state.offset.y,
+            max_offset_y,
+            wants_scroll_to_bottom,
+        );
     }
 
     // Apply pending tag action
@@ -384,6 +412,36 @@ pub fn draw_log_area(ui: &mut Ui, pane_id: PaneId, app: &mut App) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_follow_state_keeps_follow_when_at_bottom() {
+        let mut pane = Pane::new(None);
+        sync_follow_state(&mut pane, 99.5, 100.0, false);
+        assert!(pane.auto_scroll);
+        assert_eq!(pane.scroll_offset_y, 99.5);
+    }
+
+    #[test]
+    fn sync_follow_state_stops_follow_when_viewport_moves_up() {
+        let mut pane = Pane::new(None);
+        sync_follow_state(&mut pane, 72.0, 100.0, false);
+        assert!(!pane.auto_scroll);
+        assert_eq!(pane.scroll_offset_y, 72.0);
+    }
+
+    #[test]
+    fn sync_follow_state_preserves_explicit_follow_request() {
+        let mut pane = Pane::new(None);
+        pane.auto_scroll = false;
+        sync_follow_state(&mut pane, 72.0, 100.0, true);
+        assert!(pane.auto_scroll);
+        assert_eq!(pane.scroll_offset_y, 100.0);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_context_menu(
     ui: &mut egui::Ui,
@@ -407,7 +465,11 @@ fn build_context_menu(
         if hi > lo {
             let count = hi - lo + 1;
             if ui
-                .button(format!("{} Copy {} selected lines", egui_phosphor::regular::COPY, count))
+                .button(format!(
+                    "{} Copy {} selected lines",
+                    egui_phosphor::regular::COPY,
+                    count
+                ))
                 .clicked()
             {
                 let lines: Vec<String> = (lo..=hi)
@@ -432,11 +494,17 @@ fn build_context_menu(
             ui.separator();
         }
     }
-    if ui.button(format!("{} Copy line", egui_phosphor::regular::COPY)).clicked() {
+    if ui
+        .button(format!("{} Copy line", egui_phosphor::regular::COPY))
+        .clicked()
+    {
         ui.ctx().copy_text(entry_line.to_string());
         ui.close_menu();
     }
-    if ui.button(format!("{} Copy message", egui_phosphor::regular::COPY)).clicked() {
+    if ui
+        .button(format!("{} Copy message", egui_phosphor::regular::COPY))
+        .clicked()
+    {
         ui.ctx().copy_text(entry_msg.to_string());
         ui.close_menu();
     }
