@@ -350,12 +350,11 @@ fn spawn_android_capture(
                     }
                     _ => break,
                 },
-                _ = kill_rx.recv() => {
-                    let _ = child.kill().await;
-                    break;
-                }
+                _ = kill_rx.recv() => break,
             }
         }
+        drop(reader);
+        let _ = child.kill().await;
     });
 
     CaptureHandle { rx, controller }
@@ -403,12 +402,11 @@ fn spawn_ios_simulator_capture(rt: &tokio::runtime::Handle, udid: String) -> Cap
                     }
                     _ => break,
                 },
-                _ = kill_rx.recv() => {
-                    let _ = child.kill().await;
-                    break;
-                }
+                _ = kill_rx.recv() => break,
             }
         }
+        drop(reader);
+        let _ = child.kill().await;
     });
 
     CaptureHandle { rx, controller }
@@ -454,12 +452,11 @@ fn spawn_ios_device_capture(rt: &tokio::runtime::Handle, udid: String) -> Captur
                     }
                     _ => break,
                 },
-                _ = kill_rx.recv() => {
-                    let _ = child.kill().await;
-                    break;
-                }
+                _ = kill_rx.recv() => break,
             }
         }
+        drop(reader);
+        let _ = child.kill().await;
     });
 
     CaptureHandle { rx, controller }

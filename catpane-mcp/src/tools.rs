@@ -1138,6 +1138,25 @@ impl McpRuntimeState {
         Ok(DeleteWatchResponse { deleted })
     }
 
+    pub async fn shutdown_all_captures(&self) {
+        let shutdowns: Vec<CaptureShutdownWait> = {
+            let mut inner = lock_recover(&self.inner);
+            inner
+                .captures
+                .values_mut()
+                .filter(|c| c.is_running())
+                .map(|c| c.request_shutdown("server shutting down"))
+                .collect()
+        };
+        for shutdown in &shutdowns {
+            let _ = tokio::time::timeout(CAPTURE_SHUTDOWN_TIMEOUT, async {
+                shutdown.capture_shutdown.wait_for_shutdown().await;
+                wait_for_completion(shutdown.pump_done.clone()).await;
+            })
+            .await;
+        }
+    }
+
     async fn dispatch_tool_call(
         &self,
         rt: &Handle,
@@ -1417,7 +1436,15 @@ impl CaptureRuntime {
     fn snapshot(&self) -> CaptureStatus {
         self.shared.snapshot(&self.capture_id, self.is_running())
     }
+}
 
+impl Drop for CaptureRuntime {
+    fn drop(&mut self) {
+        self.capture_control.stop();
+    }
+}
+
+impl CaptureRuntime {
     fn clear_logs(&self) -> ClearLogsResponse {
         let cleared_entries = self.shared.clear_logs();
         ClearLogsResponse {

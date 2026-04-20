@@ -64,6 +64,8 @@ impl StdioMcpServer {
             }
         }
 
+        self.state.shutdown_all_captures().await;
+
         writer
             .flush()
             .await
