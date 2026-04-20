@@ -197,7 +197,7 @@ pub fn parse_ios_syslog_line(line: &str) -> Option<LogEntry> {
     static IOS_SYSLOG_RE: OnceLock<Regex> = OnceLock::new();
     let regex = IOS_SYSLOG_RE.get_or_init(|| {
         Regex::new(
-            r"^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,6}))?\s+\S+\s+(?P<process>.+?)\[(?P<pid>\d+)\]\s+<(?P<level>[^>]+)>:\s*(?P<message>.*)$",
+            r"^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,6}))?\s+(?:\S+\s+)?(?P<process>.+?)\[(?P<pid>\d+)\]\s+<(?P<level>[^>]+)>:\s*(?P<message>.*)$",
         )
         .expect("valid iOS syslog regex")
     });
@@ -338,6 +338,7 @@ mod tests {
 
     #[test]
     fn parses_ios_syslog_lines() {
+        // Old syslog_relay format (with hostname)
         let line = "Apr 16 12:11:32 iPhone SpringBoard[58] <Notice>: Application launched successfully";
         let entry = parse_ios_syslog_line(line).unwrap();
         assert_eq!(entry.platform, LogPlatform::Ios);
@@ -350,5 +351,26 @@ mod tests {
         assert_eq!(entry.subsystem, None);
         assert_eq!(entry.category, None);
         assert_eq!(entry.message, "Application launched successfully");
+    }
+
+    #[test]
+    fn parses_ios_os_trace_relay_lines() {
+        // Modern os_trace_relay format (no hostname, microsecond fractions)
+        let line = "Apr 20 17:22:28.425237 locationd[1868] <Debug>: [Accelerometer] x,y,z";
+        let entry = parse_ios_syslog_line(line).unwrap();
+        assert_eq!(entry.timestamp, "04-20 17:22:28.425");
+        assert_eq!(entry.pid, Some(1868));
+        assert_eq!(entry.tag, "locationd");
+        assert_eq!(entry.process.as_deref(), Some("locationd"));
+        assert_eq!(entry.level, LogLevel::Debug);
+        assert_eq!(entry.message, "[Accelerometer] x,y,z");
+
+        // os_trace_relay with parenthesized library name
+        let line = "Apr 20 17:22:28.438195 SpringBoard(CoreFoundation)[35] <Debug>: Bundle: value";
+        let entry = parse_ios_syslog_line(line).unwrap();
+        assert_eq!(entry.pid, Some(35));
+        assert_eq!(entry.tag, "SpringBoard(CoreFoundation)");
+        assert_eq!(entry.process.as_deref(), Some("SpringBoard(CoreFoundation)"));
+        assert_eq!(entry.message, "Bundle: value");
     }
 }
