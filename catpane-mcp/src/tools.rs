@@ -1033,16 +1033,10 @@ impl McpRuntimeState {
             watches.add(watch)
         };
 
-        Ok(CreateWatchResponse {
-            watch_id,
-            name,
-        })
+        Ok(CreateWatchResponse { watch_id, name })
     }
 
-    pub fn list_watches(
-        &self,
-        args: ListWatchesArgs,
-    ) -> Result<ListWatchesResponse, McpToolError> {
+    pub fn list_watches(&self, args: ListWatchesArgs) -> Result<ListWatchesResponse, McpToolError> {
         let selector = args.selector();
         let shared = {
             let inner = lock_recover(&self.inner);
@@ -1089,10 +1083,7 @@ impl McpRuntimeState {
             watches
                 .get(&args.watch_id)
                 .ok_or_else(|| {
-                    McpToolError::not_found(format!(
-                        "watch `{}` was not found",
-                        args.watch_id
-                    ))
+                    McpToolError::not_found(format!("watch `{}` was not found", args.watch_id))
                 })?
                 .clone()
         };
@@ -1131,10 +1122,7 @@ impl McpRuntimeState {
         })
     }
 
-    pub fn delete_watch(
-        &self,
-        args: DeleteWatchArgs,
-    ) -> Result<DeleteWatchResponse, McpToolError> {
+    pub fn delete_watch(&self, args: DeleteWatchArgs) -> Result<DeleteWatchResponse, McpToolError> {
         let selector = args.selector();
         let shared = {
             let inner = lock_recover(&self.inner);
@@ -1636,7 +1624,7 @@ impl CaptureShared {
 
 fn list_devices_tool() -> Tool {
     Tool::new(TOOL_LIST_DEVICES, empty_object_schema())
-        .with_description("List connected Android devices and booted iOS simulators that CatPane can capture logs from.")
+        .with_description("List connected Android devices plus booted iOS simulators and wired iOS devices that CatPane can capture logs from.")
 }
 
 fn get_logs_tool() -> Tool {
@@ -1683,9 +1671,9 @@ fn get_logs_tool() -> Tool {
                     ),
                 ),
                 ("text", string_property("Substring search over tag and message text.")),
-                ("process", string_property("Filter by process name substring (iOS simulator captures only).")),
-                ("subsystem", string_property("Filter by subsystem substring (iOS simulator captures only).")),
-                ("category", string_property("Filter by category substring (iOS simulator captures only).")),
+                ("process", string_property("Filter by process name substring (iOS captures only).")),
+                ("subsystem", string_property("Filter by subsystem substring (iOS captures only; physical devices may not provide this field).")),
+                ("category", string_property("Filter by category substring (iOS captures only; physical devices may not provide this field).")),
                 (
                     "since",
                     string_property(
@@ -1725,10 +1713,10 @@ fn start_capture_tool() -> Tool {
         object_schema(
             vec![
                 (
-                    "device",
-                    string_property(
-                        "Connected device identifier to capture. If omitted and exactly one Android device or booted iOS simulator is available, that device is used automatically.",
-                    ),
+                        "device",
+                        string_property(
+                            "Connected device identifier to capture. If omitted and exactly one Android device or iOS capture target is available, that device is used automatically.",
+                        ),
                 ),
                 (
                     "pid",
@@ -1759,7 +1747,7 @@ fn start_capture_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Start a new Android or iOS simulator capture and buffer it for later MCP queries.")
+    .with_description("Start a new Android, iOS simulator, or wired iOS device capture and buffer it for later MCP queries.")
 }
 
 fn stop_capture_tool() -> Tool {
@@ -1790,7 +1778,7 @@ fn get_status_tool() -> Tool {
                     "includeDevices",
                     json!({
                         "type": "boolean",
-                        "description": "Also include the current connected Android devices and booted iOS simulators."
+                        "description": "Also include the current connected Android devices and iOS capture targets."
                     }),
                 ),
             ],
@@ -1817,9 +1805,10 @@ fn boot_simulator_tool() -> Tool {
     Tool::new(
         TOOL_BOOT_SIMULATOR,
         object_schema(
-            vec![
-                ("udid", string_property("The UDID of the iOS simulator to boot.")),
-            ],
+            vec![(
+                "udid",
+                string_property("The UDID of the iOS simulator to boot."),
+            )],
             &["udid"],
         ),
     )
@@ -1830,9 +1819,10 @@ fn connect_device_tool() -> Tool {
     Tool::new(
         TOOL_CONNECT_DEVICE,
         object_schema(
-            vec![
-                ("host_port", string_property("The host:port address of the Android device to connect to.")),
-            ],
+            vec![(
+                "host_port",
+                string_property("The host:port address of the Android device to connect to."),
+            )],
             &["host_port"],
         ),
     )
@@ -1843,9 +1833,12 @@ fn disconnect_device_tool() -> Tool {
     Tool::new(
         TOOL_DISCONNECT_DEVICE,
         object_schema(
-            vec![
-                ("device", string_property("The serial or host:port identifier of the Android device to disconnect.")),
-            ],
+            vec![(
+                "device",
+                string_property(
+                    "The serial or host:port identifier of the Android device to disconnect.",
+                ),
+            )],
             &["device"],
         ),
     )
@@ -1857,8 +1850,16 @@ fn pair_device_tool() -> Tool {
         TOOL_PAIR_DEVICE,
         object_schema(
             vec![
-                ("host_port", string_property("The host:port address shown on the Android device pairing screen.")),
-                ("code", string_property("The pairing code displayed on the Android device.")),
+                (
+                    "host_port",
+                    string_property(
+                        "The host:port address shown on the Android device pairing screen.",
+                    ),
+                ),
+                (
+                    "code",
+                    string_property("The pairing code displayed on the Android device."),
+                ),
             ],
             &["host_port", "code"],
         ),
@@ -1891,13 +1892,13 @@ fn clear_location_tool() -> Tool {
     Tool::new(
         TOOL_CLEAR_LOCATION,
         object_schema(
-            vec![
-                ("device", string_property("Connected device identifier.")),
-            ],
+            vec![("device", string_property("Connected device identifier."))],
             &[],
         ),
     )
-    .with_description("Clear the spoofed GPS location on an iOS simulator, reverting to default behavior.")
+    .with_description(
+        "Clear the spoofed GPS location on an iOS simulator, reverting to default behavior.",
+    )
 }
 
 fn get_crashes_tool() -> Tool {
@@ -1953,8 +1954,14 @@ fn list_watches_tool() -> Tool {
         TOOL_LIST_WATCHES,
         object_schema(
             vec![
-                ("captureId", string_property("Specific capture ID to query.")),
-                ("device", string_property("Resolve a capture by connected device identifier.")),
+                (
+                    "captureId",
+                    string_property("Specific capture ID to query."),
+                ),
+                (
+                    "device",
+                    string_property("Resolve a capture by connected device identifier."),
+                ),
             ],
             &[],
         ),
@@ -1995,8 +2002,14 @@ fn delete_watch_tool() -> Tool {
         TOOL_DELETE_WATCH,
         object_schema(
             vec![
-                ("captureId", string_property("Specific capture ID to query.")),
-                ("device", string_property("Resolve a capture by connected device identifier.")),
+                (
+                    "captureId",
+                    string_property("Specific capture ID to query."),
+                ),
+                (
+                    "device",
+                    string_property("Resolve a capture by connected device identifier."),
+                ),
                 ("watchId", string_property("The ID of the watch to remove.")),
             ],
             &["watchId"],
@@ -2005,7 +2018,9 @@ fn delete_watch_tool() -> Tool {
     .with_description("Remove a watch from a capture.")
 }
 
-async fn handle_list_packages(args: ListPackagesArgs) -> Result<ListPackagesResponse, McpToolError> {
+async fn handle_list_packages(
+    args: ListPackagesArgs,
+) -> Result<ListPackagesResponse, McpToolError> {
     let device = resolve_connected_device(args.device).await?;
     if device.platform != DevicePlatform::Android {
         return Err(McpToolError::invalid_params(
@@ -2019,21 +2034,27 @@ async fn handle_list_packages(args: ListPackagesArgs) -> Result<ListPackagesResp
     Ok(ListPackagesResponse { packages, count })
 }
 
-async fn handle_boot_simulator(args: BootSimulatorArgs) -> Result<BootSimulatorResponse, McpToolError> {
+async fn handle_boot_simulator(
+    args: BootSimulatorArgs,
+) -> Result<BootSimulatorResponse, McpToolError> {
     let message = catpane_core::ios::boot_simulator(&args.udid)
         .await
         .map_err(McpToolError::internal)?;
     Ok(BootSimulatorResponse { message })
 }
 
-async fn handle_connect_device(args: ConnectDeviceArgs) -> Result<ConnectDeviceResponse, McpToolError> {
+async fn handle_connect_device(
+    args: ConnectDeviceArgs,
+) -> Result<ConnectDeviceResponse, McpToolError> {
     let message = catpane_core::adb::connect_device(&args.host_port)
         .await
         .map_err(McpToolError::internal)?;
     Ok(ConnectDeviceResponse { message })
 }
 
-async fn handle_disconnect_device(args: DisconnectDeviceArgs) -> Result<DisconnectDeviceResponse, McpToolError> {
+async fn handle_disconnect_device(
+    args: DisconnectDeviceArgs,
+) -> Result<DisconnectDeviceResponse, McpToolError> {
     let message = catpane_core::adb::disconnect_device(&args.device)
         .await
         .map_err(McpToolError::internal)?;
@@ -2056,28 +2077,41 @@ async fn handle_restart_adb() -> Result<RestartAdbResponse, McpToolError> {
 
 async fn handle_set_location(args: SetLocationArgs) -> Result<SetLocationResponse, McpToolError> {
     let device = resolve_connected_device(args.device).await?;
-    let message = match device.platform {
-        DevicePlatform::IosSimulator => {
-            catpane_core::ios::set_simulator_location(&device.id, args.latitude, args.longitude)
-                .await
-                .map_err(McpToolError::internal)?
-        }
-        DevicePlatform::Android => {
-            if !catpane_core::adb::is_emulator(&device.id) {
+        let message = match device.platform {
+            DevicePlatform::IosSimulator => {
+                catpane_core::ios::set_simulator_location(&device.id, args.latitude, args.longitude)
+                    .await
+                    .map_err(McpToolError::internal)?
+            }
+            DevicePlatform::IosDevice => {
                 return Err(McpToolError::invalid_params(format!(
+                    "Location spoofing is only supported on iOS simulators, not physical device '{}'.",
+                    device.id
+                )));
+            }
+            DevicePlatform::Android => {
+                if !catpane_core::adb::is_emulator(&device.id) {
+                    return Err(McpToolError::invalid_params(format!(
                     "Location spoofing is only supported on Android emulators, not physical device '{}'. Use a mock location app instead.",
                     device.id
                 )));
             }
-            catpane_core::adb::set_emulator_location(&device.id, args.latitude, args.longitude, args.altitude)
-                .await
-                .map_err(McpToolError::internal)?
+            catpane_core::adb::set_emulator_location(
+                &device.id,
+                args.latitude,
+                args.longitude,
+                args.altitude,
+            )
+            .await
+            .map_err(McpToolError::internal)?
         }
     };
     Ok(SetLocationResponse { message })
 }
 
-async fn handle_clear_location(args: ClearLocationArgs) -> Result<ClearLocationResponse, McpToolError> {
+async fn handle_clear_location(
+    args: ClearLocationArgs,
+) -> Result<ClearLocationResponse, McpToolError> {
     let device = resolve_connected_device(args.device).await?;
     match device.platform {
         DevicePlatform::IosSimulator => {
@@ -2086,6 +2120,9 @@ async fn handle_clear_location(args: ClearLocationArgs) -> Result<ClearLocationR
                 .map_err(McpToolError::internal)?;
             Ok(ClearLocationResponse { message })
         }
+        DevicePlatform::IosDevice => Err(McpToolError::invalid_params(
+            "Clearing spoofed location is only supported on iOS simulators.",
+        )),
         DevicePlatform::Android => Err(McpToolError::invalid_params(
             "Clearing spoofed location is only supported on iOS simulators. For Android emulators, set a new location or restart the emulator.",
         )),
@@ -2213,7 +2250,7 @@ async fn resolve_connected_device(device: Option<String>) -> Result<ConnectedDev
 
         if devices.is_empty() {
             return Err(McpToolError::not_found(format!(
-                "device `{device}` is not connected and no Android devices or booted iOS simulators are currently available"
+                "device `{device}` is not connected and no Android devices or iOS capture targets are currently available"
             )));
         }
 
@@ -2225,7 +2262,7 @@ async fn resolve_connected_device(device: Option<String>) -> Result<ConnectedDev
 
     match devices.as_slice() {
         [] => Err(McpToolError::not_found(
-            "no connected Android devices or booted iOS simulators found; connect a device or boot a simulator",
+            "no connected Android devices or iOS capture targets found; connect a device or boot a simulator",
         )),
         [device] => Ok(device.clone()),
         _ => Err(McpToolError::invalid_params(format!(

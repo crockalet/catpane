@@ -233,7 +233,7 @@ impl Filter {
                         return false;
                     }
                 }
-                LogPlatform::IosSimulator => {
+                LogPlatform::Ios => {
                     if !self.has_explicit_ios_filters() && is_ios_device_log(entry) {
                         return false;
                     }
@@ -454,7 +454,7 @@ mod tests {
         filter.ios_category = Some("network".to_string());
 
         let entry = LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "03-29 13:59:40.572".to_string(),
             pid: Some(123),
             tid: Some(42),
@@ -473,7 +473,7 @@ mod tests {
     fn hides_ios_device_logs_by_default() {
         let filter = Filter::default();
         let entry = LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "03-29 13:59:40.572".to_string(),
             pid: Some(123),
             tid: Some(42),
@@ -492,7 +492,7 @@ mod tests {
     fn keeps_ios_app_logs_visible_by_default() {
         let filter = Filter::default();
         let entry = LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "03-29 13:59:40.572".to_string(),
             pid: Some(123),
             tid: Some(42),
@@ -513,7 +513,7 @@ mod tests {
         filter.ios_process = Some("SpringBoard".to_string());
 
         let entry = LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "03-29 13:59:40.572".to_string(),
             pid: Some(123),
             tid: Some(42),
@@ -534,7 +534,7 @@ mod tests {
         filter.tag_filters = Filter::parse_tag_filters("tag:com.apple.SpringBoard");
 
         let entry = LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "03-29 13:59:40.572".to_string(),
             pid: Some(123),
             tid: Some(42),

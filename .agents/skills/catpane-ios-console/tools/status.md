@@ -48,6 +48,6 @@ Use `get_status` as the default first call. It shows what captures exist, whethe
 
 - With no selector, `captures` includes every registered capture.
 - With `captureId` or `device`, `captures` is narrowed to that capture, but the top-level counts still describe the whole runtime.
-- `includeDevices` returns both connected Android devices and booted iOS simulators.
+- `includeDevices` returns both connected Android devices and any iOS capture targets CatPane can currently use.
 - Use this before `start_capture` to avoid duplicate captures.
 - Use this before `get_logs` to learn the right `captureId` or `device` selector.

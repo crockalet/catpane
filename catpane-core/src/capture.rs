@@ -7,15 +7,16 @@ use tokio::{
 };
 
 use crate::{
-    adb, ios,
+    adb, ios, ios_device,
     log_buffer_config::initial_log_backlog,
-    log_entry::{LogEntry, LogPlatform, parse_ios_log_ndjson_line, parse_logcat_line},
+    log_entry::{LogEntry, parse_ios_log_ndjson_line, parse_ios_syslog_line, parse_logcat_line},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DevicePlatform {
     Android,
+    IosDevice,
     IosSimulator,
 }
 
@@ -23,16 +24,8 @@ impl DevicePlatform {
     pub fn label(self) -> &'static str {
         match self {
             Self::Android => "Android",
+            Self::IosDevice => "iOS Device",
             Self::IosSimulator => "iOS Simulator",
-        }
-    }
-}
-
-impl From<LogPlatform> for DevicePlatform {
-    fn from(value: LogPlatform) -> Self {
-        match value {
-            LogPlatform::Android => Self::Android,
-            LogPlatform::IosSimulator => Self::IosSimulator,
         }
     }
 }
@@ -61,7 +54,10 @@ impl ConnectedDevice {
     }
 
     pub fn supports_ios_filters(&self) -> bool {
-        self.platform == DevicePlatform::IosSimulator
+        matches!(
+            self.platform,
+            DevicePlatform::IosDevice | DevicePlatform::IosSimulator
+        )
     }
 
     pub fn supports_wireless_debugging(&self) -> bool {
@@ -137,6 +133,18 @@ pub async fn list_devices_strict() -> Result<Vec<ConnectedDevice>, String> {
         .collect();
 
     devices.extend(
+        ios_device::list_connected_devices_strict()
+            .await?
+            .into_iter()
+            .map(|device| ConnectedDevice {
+                id: device.udid,
+                name: device.name,
+                description: device.description,
+                platform: DevicePlatform::IosDevice,
+            }),
+    );
+
+    devices.extend(
         ios::list_booted_simulators_strict()
             .await?
             .into_iter()
@@ -169,6 +177,18 @@ pub async fn list_devices() -> Vec<ConnectedDevice> {
             platform: DevicePlatform::Android,
         })
         .collect();
+
+    devices.extend(
+        ios_device::list_connected_devices()
+            .await
+            .into_iter()
+            .map(|device| ConnectedDevice {
+                id: device.udid,
+                name: device.name,
+                description: device.description,
+                platform: DevicePlatform::IosDevice,
+            }),
+    );
 
     devices.extend(
         ios::list_booted_simulators()
@@ -268,6 +288,7 @@ pub fn spawn_capture(
 ) -> CaptureHandle {
     match device.platform {
         DevicePlatform::Android => spawn_android_capture(rt, device.id.clone(), pid_filter),
+        DevicePlatform::IosDevice => spawn_ios_device_capture(rt, device.id.clone()),
         DevicePlatform::IosSimulator => spawn_ios_simulator_capture(rt, device.id.clone()),
     }
 }
@@ -375,6 +396,57 @@ fn spawn_ios_simulator_capture(rt: &tokio::runtime::Handle, udid: String) -> Cap
                 line = reader.next_line() => match line {
                     Ok(Some(line)) => {
                         if let Some(entry) = parse_ios_log_ndjson_line(&line) {
+                            if tx.send(entry).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => break,
+                },
+                _ = kill_rx.recv() => {
+                    let _ = child.kill().await;
+                    break;
+                }
+            }
+        }
+    });
+
+    CaptureHandle { rx, controller }
+}
+
+fn spawn_ios_device_capture(rt: &tokio::runtime::Handle, udid: String) -> CaptureHandle {
+    let (tx, rx) = mpsc::channel::<LogEntry>(4096);
+    let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
+    let (completion_tx, completion_rx) = watch::channel(false);
+    let controller = CaptureController {
+        kill_tx,
+        completion_rx,
+    };
+
+    rt.spawn(async move {
+        let _completion = CompletionSignal::new(completion_tx);
+        let mut child = match Command::new(ios_device::idevicesyslog_binary())
+            .args(["-u", &udid])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return,
+        };
+
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => return,
+        };
+
+        let mut reader = BufReader::new(stdout).lines();
+        loop {
+            tokio::select! {
+                line = reader.next_line() => match line {
+                    Ok(Some(line)) => {
+                        if let Some(entry) = parse_ios_syslog_line(&line) {
                             if tx.send(entry).await.is_err() {
                                 break;
                             }

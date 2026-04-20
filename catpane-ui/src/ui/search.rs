@@ -76,7 +76,10 @@ pub fn draw_search_bar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                         pane.auto_scroll = false;
                     }
                 }
-                if ui.small_button(egui_phosphor::regular::CARET_DOWN).clicked() {
+                if ui
+                    .small_button(egui_phosphor::regular::CARET_DOWN)
+                    .clicked()
+                {
                     if let Some(fi) = pane.search_next() {
                         pane.scroll_to_fi = Some(fi);
                         pane.auto_scroll = false;

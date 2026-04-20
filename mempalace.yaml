@@ -1,0 +1,50 @@
+wing: catpane
+rooms:
+- name: packaging
+  description: Files from packaging/
+  keywords:
+  - packaging
+  - packaging
+- name: target
+  description: Files from target/
+  keywords:
+  - target
+  - target
+- name: catpane_ui
+  description: Files from catpane-ui/
+  keywords:
+  - catpane_ui
+  - catpane-ui
+- name: catpane_mcp
+  description: Files from catpane-mcp/
+  keywords:
+  - catpane_mcp
+  - catpane-mcp
+- name: catpane_cli
+  description: Files from catpane-cli/
+  keywords:
+  - catpane_cli
+  - catpane-cli
+- name: catpane_core
+  description: Files from catpane-core/
+  keywords:
+  - catpane_core
+  - catpane-core
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: design
+  description: Files from assets/
+  keywords:
+  - design
+  - assets
+- name: documentation
+  description: Files from doc/
+  keywords:
+  - documentation
+  - doc
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

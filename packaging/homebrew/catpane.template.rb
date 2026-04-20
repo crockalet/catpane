@@ -31,9 +31,15 @@ cask "catpane" do
   ]
 
   caveats <<~EOS
-    `adb` is required at runtime.
-    Install it with:
+    CatPane needs platform-specific tools at runtime:
+
+    For Android capture, install adb:
       brew install --cask android-platform-tools
+
+    For physical iOS device capture, install libimobiledevice:
+      brew install libimobiledevice
+
+    iOS simulator capture works out of the box with Xcode installed.
 
     A `catpane` CLI symlink is added to your PATH, so you can run the MCP server with:
       catpane mcp

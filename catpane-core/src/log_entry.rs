@@ -1,5 +1,6 @@
-use std::fmt;
+use std::{fmt, sync::OnceLock};
 
+use regex::Regex;
 use serde::Deserialize;
 
 #[derive(
@@ -81,7 +82,7 @@ impl fmt::Display for LogLevel {
 #[serde(rename_all = "camelCase")]
 pub enum LogPlatform {
     Android,
-    IosSimulator,
+    Ios,
 }
 
 #[derive(Debug, Clone)]
@@ -179,7 +180,7 @@ pub fn parse_ios_log_ndjson_line(line: &str) -> Option<LogEntry> {
         .unwrap_or_else(|| "iOS".to_string());
 
     Some(LogEntry {
-        platform: LogPlatform::IosSimulator,
+        platform: LogPlatform::Ios,
         timestamp,
         pid: Some(record.process_id),
         tid: Some(record.thread_id),
@@ -192,6 +193,40 @@ pub fn parse_ios_log_ndjson_line(line: &str) -> Option<LogEntry> {
     })
 }
 
+pub fn parse_ios_syslog_line(line: &str) -> Option<LogEntry> {
+    static IOS_SYSLOG_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = IOS_SYSLOG_RE.get_or_init(|| {
+        Regex::new(
+            r"^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,6}))?\s+\S+\s+(?P<process>.+?)\[(?P<pid>\d+)\]\s+<(?P<level>[^>]+)>:\s*(?P<message>.*)$",
+        )
+        .expect("valid iOS syslog regex")
+    });
+    let captures = regex.captures(line)?;
+
+    let timestamp = normalize_ios_syslog_timestamp(
+        captures.name("month")?.as_str(),
+        captures.name("day")?.as_str(),
+        captures.name("time")?.as_str(),
+        captures.name("fraction").map(|value| value.as_str()),
+    )?;
+    let process = normalize_optional_string(captures.name("process")?.as_str());
+    let pid = captures.name("pid")?.as_str().parse().ok();
+    let message = captures.name("message")?.as_str().to_string();
+
+    Some(LogEntry {
+        platform: LogPlatform::Ios,
+        timestamp,
+        pid,
+        tid: None,
+        level: ios_syslog_level_to_level(captures.name("level")?.as_str()),
+        tag: process.clone().unwrap_or_else(|| "iOS".to_string()),
+        process,
+        subsystem: None,
+        category: None,
+        message,
+    })
+}
+
 fn normalize_ios_timestamp(raw: &str) -> Option<String> {
     if raw.len() < 23 {
         return None;
@@ -200,6 +235,36 @@ fn normalize_ios_timestamp(raw: &str) -> Option<String> {
     let day = raw.get(8..10)?;
     let time = raw.get(11..23)?;
     Some(format!("{month}-{day} {time}"))
+}
+
+fn normalize_ios_syslog_timestamp(
+    month: &str,
+    day: &str,
+    time: &str,
+    fraction: Option<&str>,
+) -> Option<String> {
+    let month = match month {
+        "Jan" => "01",
+        "Feb" => "02",
+        "Mar" => "03",
+        "Apr" => "04",
+        "May" => "05",
+        "Jun" => "06",
+        "Jul" => "07",
+        "Aug" => "08",
+        "Sep" => "09",
+        "Oct" => "10",
+        "Nov" => "11",
+        "Dec" => "12",
+        _ => return None,
+    };
+    let day = format!("{:02}", day.parse::<u8>().ok()?);
+    let millis = match fraction {
+        Some(value) if value.len() >= 3 => value[..3].to_string(),
+        Some(value) => format!("{value:0<3}"),
+        None => "000".to_string(),
+    };
+    Some(format!("{month}-{day} {time}.{millis}"))
 }
 
 fn process_name_from_path(path: &str) -> Option<String> {
@@ -224,6 +289,18 @@ fn ios_message_type_to_level(message_type: &str) -> LogLevel {
         "error" => LogLevel::Error,
         "fault" => LogLevel::Fatal,
         "default" | "notice" => LogLevel::Info,
+        "warning" => LogLevel::Warn,
+        _ => LogLevel::Verbose,
+    }
+}
+
+fn ios_syslog_level_to_level(message_type: &str) -> LogLevel {
+    match message_type.trim().to_ascii_lowercase().as_str() {
+        "debug" => LogLevel::Debug,
+        "info" | "notice" => LogLevel::Info,
+        "warning" | "warn" => LogLevel::Warn,
+        "error" => LogLevel::Error,
+        "fault" | "critical" => LogLevel::Fatal,
         _ => LogLevel::Verbose,
     }
 }
@@ -248,7 +325,7 @@ mod tests {
     fn parses_ios_ndjson_lines() {
         let line = r#"{"messageType":"Default","subsystem":"com.example.app","category":"network","threadID":42,"processImagePath":"/Applications/MyApp.app/MyApp","timestamp":"2026-03-29 13:59:40.572987+0500","eventMessage":"hello from ios","processID":123}"#;
         let entry = parse_ios_log_ndjson_line(line).unwrap();
-        assert_eq!(entry.platform, LogPlatform::IosSimulator);
+        assert_eq!(entry.platform, LogPlatform::Ios);
         assert_eq!(entry.timestamp, "03-29 13:59:40.572");
         assert_eq!(entry.pid, Some(123));
         assert_eq!(entry.tid, Some(42));
@@ -257,5 +334,21 @@ mod tests {
         assert_eq!(entry.subsystem.as_deref(), Some("com.example.app"));
         assert_eq!(entry.category.as_deref(), Some("network"));
         assert_eq!(entry.message, "hello from ios");
+    }
+
+    #[test]
+    fn parses_ios_syslog_lines() {
+        let line = "Apr 16 12:11:32 iPhone SpringBoard[58] <Notice>: Application launched successfully";
+        let entry = parse_ios_syslog_line(line).unwrap();
+        assert_eq!(entry.platform, LogPlatform::Ios);
+        assert_eq!(entry.timestamp, "04-16 12:11:32.000");
+        assert_eq!(entry.pid, Some(58));
+        assert_eq!(entry.tid, None);
+        assert_eq!(entry.level, LogLevel::Info);
+        assert_eq!(entry.tag, "SpringBoard");
+        assert_eq!(entry.process.as_deref(), Some("SpringBoard"));
+        assert_eq!(entry.subsystem, None);
+        assert_eq!(entry.category, None);
+        assert_eq!(entry.message, "Application launched successfully");
     }
 }

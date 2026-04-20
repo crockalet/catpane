@@ -1,7 +1,9 @@
 use egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 
 use super::theme::*;
-use crate::app::{App, DeviceLocationState, QrPairStatus, QrPairingState, SavedLocation, SidebarTab};
+use crate::app::{
+    App, DeviceLocationState, QrPairStatus, QrPairingState, SavedLocation, SidebarTab,
+};
 use crate::pane::WATCH_COLORS;
 use catpane_core::capture::{ConnectedDevice, DevicePlatform};
 use catpane_core::crash_detector::CrashType;
@@ -160,9 +162,21 @@ fn draw_sidebar_rail(ui: &mut Ui, app: &mut App, sidebar_open: bool) {
     ui.add_space(8.0);
 
     let tabs: &[(SidebarTab, &str, &str)] = &[
-        (SidebarTab::Devices, egui_phosphor::regular::DEVICE_MOBILE, "Devices"),
-        (SidebarTab::Location, egui_phosphor::regular::MAP_PIN, "Location"),
-        (SidebarTab::Crashes, egui_phosphor::regular::WARNING_CIRCLE, "Crashes"),
+        (
+            SidebarTab::Devices,
+            egui_phosphor::regular::DEVICE_MOBILE,
+            "Devices",
+        ),
+        (
+            SidebarTab::Location,
+            egui_phosphor::regular::MAP_PIN,
+            "Location",
+        ),
+        (
+            SidebarTab::Crashes,
+            egui_phosphor::regular::WARNING_CIRCLE,
+            "Crashes",
+        ),
         (SidebarTab::Watches, egui_phosphor::regular::EYE, "Watches"),
     ];
 
@@ -293,8 +307,14 @@ fn draw_tab_bar(ui: &mut Ui, app: &mut App) {
         .unwrap_or(0);
 
     let tabs: Vec<(SidebarTab, String)> = vec![
-        (SidebarTab::Devices, format!("{} Devices", egui_phosphor::regular::DEVICE_MOBILE)),
-        (SidebarTab::Location, format!("{} Location", egui_phosphor::regular::MAP_PIN)),
+        (
+            SidebarTab::Devices,
+            format!("{} Devices", egui_phosphor::regular::DEVICE_MOBILE),
+        ),
+        (
+            SidebarTab::Location,
+            format!("{} Location", egui_phosphor::regular::MAP_PIN),
+        ),
         (
             SidebarTab::Crashes,
             if crash_count > 0 {
@@ -322,7 +342,8 @@ fn draw_tab_bar(ui: &mut Ui, app: &mut App) {
             } else {
                 inactive_color
             };
-            let response = ui.selectable_label(is_active, RichText::new(label).color(color).size(11.0));
+            let response =
+                ui.selectable_label(is_active, RichText::new(label).color(color).size(11.0));
             if response.clicked() {
                 app.sidebar_tab = *tab;
             }
@@ -731,7 +752,7 @@ fn draw_ios_simulator_section(ui: &mut Ui, app: &mut App) {
     let booted_count = app
         .devices
         .iter()
-        .filter(|device| device.supports_ios_filters())
+        .filter(|device| device.platform == DevicePlatform::IosSimulator)
         .count();
 
     ui.label(
@@ -856,7 +877,10 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
 
     let device_hint = match &focused_device {
         Some(d) if d.platform == DevicePlatform::IosSimulator => "iOS Simulator",
-        Some(d) if d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id) => {
+        Some(d) if d.platform == DevicePlatform::IosDevice => "iOS Device",
+        Some(d)
+            if d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id) =>
+        {
             "Android Emulator"
         }
         Some(d) if d.platform == DevicePlatform::Android => "Android (physical – not supported)",
@@ -946,10 +970,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
 
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(
-                    can_set && !task_running,
-                    egui::Button::new("Set Location"),
-                )
+                .add_enabled(can_set && !task_running, egui::Button::new("Set Location"))
                 .clicked()
             {
                 let lat = match lat_str.trim().parse::<f64>() {
@@ -982,8 +1003,13 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                     app.rt.spawn(async move {
                         let result = match platform {
                             DevicePlatform::IosSimulator => {
-                                catpane_core::ios::set_simulator_location(&device_id, lat, lon).await
+                                catpane_core::ios::set_simulator_location(&device_id, lat, lon)
+                                    .await
                             }
+                            DevicePlatform::IosDevice => Err(
+                                "Location spoofing is only supported on iOS simulators. Use a development build or platform tooling on the device instead."
+                                    .to_string(),
+                            ),
                             DevicePlatform::Android => {
                                 catpane_core::adb::set_emulator_location(&device_id, lat, lon, None)
                                     .await
@@ -998,10 +1024,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                 .as_ref()
                 .is_some_and(|d| d.platform == DevicePlatform::IosSimulator);
             if ui
-                .add_enabled(
-                    can_clear && !task_running,
-                    egui::Button::new("Clear"),
-                )
+                .add_enabled(can_clear && !task_running, egui::Button::new("Clear"))
                 .on_hover_text("Clear spoofed location (iOS Simulator only)")
                 .clicked()
             {
@@ -1013,8 +1036,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                     }
                     let device_id = device.id.clone();
                     app.rt.spawn(async move {
-                        let result =
-                            catpane_core::ios::clear_simulator_location(&device_id).await;
+                        let result = catpane_core::ios::clear_simulator_location(&device_id).await;
                         let _ = tx.send(result).await;
                     });
                 }
@@ -1102,7 +1124,11 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
                         .size(11.0),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button(egui_phosphor::regular::CROSS).on_hover_text("Delete").clicked() {
+                    if ui
+                        .small_button(egui_phosphor::regular::CROSS)
+                        .on_hover_text("Delete")
+                        .clicked()
+                    {
                         to_delete = Some(i);
                     }
                     if ui.small_button("Use").clicked() {
@@ -1115,10 +1141,7 @@ fn draw_location_tab(ui: &mut Ui, app: &mut App) {
         if let Some(idx) = to_use {
             let loc = &app.saved_locations[idx];
             if let Some(dev_id) = &device_id {
-                let state = app
-                    .device_locations
-                    .entry(dev_id.clone())
-                    .or_default();
+                let state = app.device_locations.entry(dev_id.clone()).or_default();
                 state.lat = format!("{}", loc.lat);
                 state.lon = format!("{}", loc.lon);
                 state.preset = loc.name.clone();
@@ -1154,9 +1177,12 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
 
     let count = crash_reports.len();
     ui.label(
-        RichText::new(format!("{} Crashes ({count})", egui_phosphor::regular::WARNING_CIRCLE))
-            .strong()
-            .size(13.0),
+        RichText::new(format!(
+            "{} Crashes ({count})",
+            egui_phosphor::regular::WARNING_CIRCLE
+        ))
+        .strong()
+        .size(13.0),
     );
     ui.add_space(4.0);
 
@@ -1174,7 +1200,12 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(type_label).color(badge_color).strong().size(11.0));
+                ui.label(
+                    RichText::new(type_label)
+                        .color(badge_color)
+                        .strong()
+                        .size(11.0),
+                );
                 if !report.timestamp.is_empty() {
                     ui.label(RichText::new(&report.timestamp).weak().size(10.0));
                 }
@@ -1205,8 +1236,14 @@ fn draw_crashes_tab(ui: &mut Ui, app: &mut App) {
                 }
 
                 // Copy button
-                if ui.small_button(format!("{} Copy", egui_phosphor::regular::COPY)).clicked() {
-                    let mut text = format!("[{}] {}\n{}\n", type_label, report.timestamp, report.headline);
+                if ui
+                    .small_button(format!("{} Copy", egui_phosphor::regular::COPY))
+                    .clicked()
+                {
+                    let mut text = format!(
+                        "[{}] {}\n{}\n",
+                        type_label, report.timestamp, report.headline
+                    );
                     // Gather context lines from pane entries
                     if let Some(pane) = app.panes.get(&app.focused_pane) {
                         let start = report.first_index;
@@ -1335,11 +1372,13 @@ fn draw_watches_tab(ui: &mut Ui, app: &mut App) {
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("●").color(color));
-            ui.label(
-                RichText::new(format!("{} ({})", watch.name, watch.match_count)).size(12.0),
-            );
+            ui.label(RichText::new(format!("{} ({})", watch.name, watch.match_count)).size(12.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button(egui_phosphor::regular::CROSS).on_hover_text("Remove watch").clicked() {
+                if ui
+                    .small_button(egui_phosphor::regular::CROSS)
+                    .on_hover_text("Remove watch")
+                    .clicked()
+                {
                     watch_to_remove = Some(i);
                 }
             });

@@ -20,5 +20,5 @@ Use `list_devices` when you need current capture-device identifiers before start
 
 - `list_devices` does not create a capture.
 - If `deviceCount` is `0`, `start_capture` will fail until adb sees a device.
-- This shared tool can also return booted iOS simulators; ignore non-Android entries for this skill.
+- This shared tool can also return iOS capture targets such as booted simulators and wired physical devices; ignore non-Android entries for this skill.
 - If you also need capture state, prefer `get_status` with `{"includeDevices": true}` so you can inspect both captures and devices in one call.

@@ -56,7 +56,13 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                         }
                     }
                     ui.separator();
-                    if ui.button(format!("{} Refresh devices", egui_phosphor::regular::ARROW_CLOCKWISE)).clicked() {
+                    if ui
+                        .button(format!(
+                            "{} Refresh devices",
+                            egui_phosphor::regular::ARROW_CLOCKWISE
+                        ))
+                        .clicked()
+                    {
                         app.device_refresh_pending = true;
                     }
                 });
@@ -155,7 +161,11 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                                 if ui
                                     .selectable_label(
                                         false,
-                                        RichText::new(format!("{} Clear filter", egui_phosphor::regular::CROSS)).color(OD_FG_DIM),
+                                        RichText::new(format!(
+                                            "{} Clear filter",
+                                            egui_phosphor::regular::CROSS
+                                        ))
+                                        .color(OD_FG_DIM),
                                     )
                                     .clicked()
                                 {
@@ -281,7 +291,9 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             };
             if ui
                 .add(egui::Button::new(
-                    RichText::new(egui_phosphor::regular::ARROW_LINE_DOWN).size(15.0).color(follow_color),
+                    RichText::new(egui_phosphor::regular::ARROW_LINE_DOWN)
+                        .size(15.0)
+                        .color(follow_color),
                 ))
                 .on_hover_text(if pane.auto_scroll {
                     "Following logs (click to stop)"
@@ -306,7 +318,9 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
             };
             if ui
                 .add(egui::Button::new(
-                    RichText::new(egui_phosphor::regular::KEY_RETURN).size(15.0).color(wrap_color),
+                    RichText::new(egui_phosphor::regular::KEY_RETURN)
+                        .size(15.0)
+                        .color(wrap_color),
                 ))
                 .on_hover_text(if pane.word_wrap {
                     "Word wrap on (click to disable)"
@@ -325,7 +339,9 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
 
             // Pause / resume
             let pause_icon = if pane.paused {
-                RichText::new(egui_phosphor::regular::PLAY).size(15.0).color(OD_GREEN)
+                RichText::new(egui_phosphor::regular::PLAY)
+                    .size(15.0)
+                    .color(OD_GREEN)
             } else {
                 RichText::new(egui_phosphor::regular::PAUSE).size(15.0)
             };
@@ -339,14 +355,14 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
 
             // Clear
             if ui
-                .add(egui::Button::new(RichText::new(egui_phosphor::regular::TRASH).size(15.0)))
+                .add(egui::Button::new(
+                    RichText::new(egui_phosphor::regular::TRASH).size(15.0),
+                ))
                 .on_hover_text("Clear logs")
                 .clicked()
             {
                 pane.clear();
             }
-
-
         });
     });
 

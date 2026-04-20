@@ -596,10 +596,8 @@ impl Pane {
             let last = report.last_index;
             let ctx_start = first.saturating_sub(CRASH_CONTEXT_BEFORE);
             let ctx_end = (last + CRASH_CONTEXT_AFTER + 1).min(self.entries.len());
-            let context_lines: Vec<LogEntry> = self.entries[ctx_start..ctx_end]
-                .iter()
-                .cloned()
-                .collect();
+            let context_lines: Vec<LogEntry> =
+                self.entries[ctx_start..ctx_end].iter().cloned().collect();
             let crash_start_offset = first - ctx_start;
             let crash_end_offset = last - ctx_start;
 

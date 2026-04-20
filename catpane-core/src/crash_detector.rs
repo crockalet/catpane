@@ -76,8 +76,7 @@ impl CrashDetector {
                 None
             }
             DetectorState::Accumulating(mut pending) => {
-                if pending.lines.len() < MAX_ACCUMULATION_LINES
-                    && continues_crash(&pending, entry)
+                if pending.lines.len() < MAX_ACCUMULATION_LINES && continues_crash(&pending, entry)
                 {
                     pending.lines.push(entry.message.clone());
                     pending.last_index = index;
@@ -117,7 +116,7 @@ impl Default for CrashDetector {
 fn try_start_crash(index: usize, entry: &LogEntry) -> Option<PendingCrash> {
     match entry.platform {
         LogPlatform::Android => try_start_android(index, entry),
-        LogPlatform::IosSimulator => try_start_ios(index, entry),
+        LogPlatform::Ios => try_start_ios(index, entry),
     }
 }
 
@@ -217,15 +216,20 @@ fn continues_java(entry: &LogEntry) -> bool {
 fn continues_native(entry: &LogEntry) -> bool {
     let msg = &entry.message;
     let tag = &entry.tag;
-    let is_crash_tag = tag == "DEBUG" || tag == "crash_dump" || tag == "tombstoned" || tag == "libc";
+    let is_crash_tag =
+        tag == "DEBUG" || tag == "crash_dump" || tag == "tombstoned" || tag == "libc";
 
     if !is_crash_tag {
         return false;
     }
 
-    msg.contains("#") || msg.contains("backtrace:") || msg.contains("signal")
-        || msg.contains("pc ") || msg.contains("fault addr")
-        || msg.contains("Abort message") || msg.contains("pid:")
+    msg.contains("#")
+        || msg.contains("backtrace:")
+        || msg.contains("signal")
+        || msg.contains("pc ")
+        || msg.contains("fault addr")
+        || msg.contains("Abort message")
+        || msg.contains("pid:")
 }
 
 fn continues_anr(pending: &PendingCrash, entry: &LogEntry) -> bool {
@@ -367,7 +371,7 @@ mod tests {
 
     fn ios_entry(level: LogLevel, message: &str) -> LogEntry {
         LogEntry {
-            platform: LogPlatform::IosSimulator,
+            platform: LogPlatform::Ios,
             timestamp: "2024-01-01 12:00:00.000".into(),
             pid: Some(5678),
             tid: Some(5678),
@@ -389,8 +393,16 @@ mod tests {
                 "AndroidRuntime",
                 "java.lang.NullPointerException: Attempt to invoke virtual method",
             ),
-            android_entry(LogLevel::Error, "AndroidRuntime", "\tat com.example.App.onCreate(App.java:42)"),
-            android_entry(LogLevel::Error, "AndroidRuntime", "\tat android.app.Activity.performCreate(Activity.java:1)"),
+            android_entry(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat com.example.App.onCreate(App.java:42)",
+            ),
+            android_entry(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat android.app.Activity.performCreate(Activity.java:1)",
+            ),
             android_entry(LogLevel::Info, "System", "Normal log after crash"),
         ];
 
@@ -413,13 +425,21 @@ mod tests {
                 "AndroidRuntime",
                 "java.lang.RuntimeException: Unable to start activity",
             ),
-            android_entry(LogLevel::Error, "AndroidRuntime", "\tat android.app.ActivityThread.main(ActivityThread.java:1)"),
+            android_entry(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat android.app.ActivityThread.main(ActivityThread.java:1)",
+            ),
             android_entry(
                 LogLevel::Error,
                 "AndroidRuntime",
                 "Caused by: java.lang.NullPointerException",
             ),
-            android_entry(LogLevel::Error, "AndroidRuntime", "\tat com.example.Foo.bar(Foo.java:10)"),
+            android_entry(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat com.example.Foo.bar(Foo.java:10)",
+            ),
             android_entry(LogLevel::Error, "AndroidRuntime", "... 5 more"),
             android_entry(LogLevel::Info, "System", "unrelated"),
         ];
@@ -435,11 +455,23 @@ mod tests {
     #[test]
     fn native_crash() {
         let entries = vec![
-            android_entry(LogLevel::Fatal, "libc", "Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0"),
+            android_entry(
+                LogLevel::Fatal,
+                "libc",
+                "Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0",
+            ),
             android_entry(LogLevel::Fatal, "DEBUG", "pid: 1234, tid: 1234, name: main"),
             android_entry(LogLevel::Fatal, "DEBUG", "backtrace:"),
-            android_entry(LogLevel::Fatal, "DEBUG", "    #00 pc 0x00001234  /system/lib/libc.so"),
-            android_entry(LogLevel::Fatal, "DEBUG", "    #01 pc 0x00005678  /data/app/libfoo.so"),
+            android_entry(
+                LogLevel::Fatal,
+                "DEBUG",
+                "    #00 pc 0x00001234  /system/lib/libc.so",
+            ),
+            android_entry(
+                LogLevel::Fatal,
+                "DEBUG",
+                "    #01 pc 0x00005678  /data/app/libfoo.so",
+            ),
             android_entry(LogLevel::Info, "System", "normal line"),
         ];
 
@@ -456,7 +488,11 @@ mod tests {
     fn anr_detection() {
         let entries = vec![
             android_entry(LogLevel::Error, "ActivityManager", "ANR in com.example.app"),
-            android_entry(LogLevel::Error, "ActivityManager", "Reason: Input dispatching timed out"),
+            android_entry(
+                LogLevel::Error,
+                "ActivityManager",
+                "Reason: Input dispatching timed out",
+            ),
             android_entry(LogLevel::Info, "System", "something else"),
         ];
 
@@ -472,9 +508,18 @@ mod tests {
     #[test]
     fn ios_crash_detection() {
         let entries = vec![
-            ios_entry(LogLevel::Error, "Terminating app due to uncaught exception 'NSInvalidArgumentException'"),
-            ios_entry(LogLevel::Error, "0x1a2b3c CoreFoundation __exceptionPreprocess"),
-            ios_entry(LogLevel::Error, "0x4d5e6f libobjc.A.dylib objc_exception_throw"),
+            ios_entry(
+                LogLevel::Error,
+                "Terminating app due to uncaught exception 'NSInvalidArgumentException'",
+            ),
+            ios_entry(
+                LogLevel::Error,
+                "0x1a2b3c CoreFoundation __exceptionPreprocess",
+            ),
+            ios_entry(
+                LogLevel::Error,
+                "0x4d5e6f libobjc.A.dylib objc_exception_throw",
+            ),
             ios_entry(LogLevel::Info, "normal ios log"),
         ];
 
@@ -490,10 +535,18 @@ mod tests {
     fn multiple_crashes_in_sequence() {
         let entries = vec![
             android_entry(LogLevel::Error, "AndroidRuntime", "FATAL EXCEPTION: main"),
-            android_entry(LogLevel::Error, "AndroidRuntime", "\tat com.example.A.foo(A.java:1)"),
+            android_entry(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat com.example.A.foo(A.java:1)",
+            ),
             // Different PID starts a new crash section — but first, a normal line to break
             android_entry(LogLevel::Info, "System", "gap"),
-            android_entry(LogLevel::Error, "ActivityManager", "ANR in com.example.other"),
+            android_entry(
+                LogLevel::Error,
+                "ActivityManager",
+                "ANR in com.example.other",
+            ),
             android_entry(LogLevel::Info, "System", "done"),
         ];
 
@@ -520,7 +573,11 @@ mod tests {
     fn flush_emits_pending() {
         let mut detector = CrashDetector::new();
         let trigger = android_entry(LogLevel::Error, "AndroidRuntime", "FATAL EXCEPTION: main");
-        let frame = android_entry(LogLevel::Error, "AndroidRuntime", "\tat com.example.Crash.run(Crash.java:1)");
+        let frame = android_entry(
+            LogLevel::Error,
+            "AndroidRuntime",
+            "\tat com.example.Crash.run(Crash.java:1)",
+        );
 
         assert!(detector.feed(0, &trigger).is_none());
         assert!(detector.feed(1, &frame).is_none());
@@ -534,9 +591,11 @@ mod tests {
 
     #[test]
     fn accumulation_limit() {
-        let mut entries = vec![
-            android_entry(LogLevel::Error, "AndroidRuntime", "FATAL EXCEPTION: main"),
-        ];
+        let mut entries = vec![android_entry(
+            LogLevel::Error,
+            "AndroidRuntime",
+            "FATAL EXCEPTION: main",
+        )];
         // Add 200 stack frames to hit the limit
         for i in 0..200 {
             entries.push(android_entry(
@@ -563,10 +622,25 @@ mod tests {
     #[test]
     fn different_pid_breaks_accumulation() {
         let entries = vec![
-            android_entry_pid(LogLevel::Error, "AndroidRuntime", "FATAL EXCEPTION: main", 100),
-            android_entry_pid(LogLevel::Error, "AndroidRuntime", "\tat com.example.Foo.bar(Foo.java:1)", 100),
+            android_entry_pid(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "FATAL EXCEPTION: main",
+                100,
+            ),
+            android_entry_pid(
+                LogLevel::Error,
+                "AndroidRuntime",
+                "\tat com.example.Foo.bar(Foo.java:1)",
+                100,
+            ),
             // Different PID should break accumulation
-            android_entry_pid(LogLevel::Info, "AndroidRuntime", "\tat com.other.Baz.qux(Baz.java:1)", 999),
+            android_entry_pid(
+                LogLevel::Info,
+                "AndroidRuntime",
+                "\tat com.other.Baz.qux(Baz.java:1)",
+                999,
+            ),
         ];
 
         let reports = detect_crashes(&entries);
@@ -579,7 +653,11 @@ mod tests {
     #[test]
     fn detect_crashes_indexed_offset() {
         let e1 = android_entry(LogLevel::Error, "AndroidRuntime", "FATAL EXCEPTION: main");
-        let e2 = android_entry(LogLevel::Error, "AndroidRuntime", "\tat com.example.A.b(A.java:1)");
+        let e2 = android_entry(
+            LogLevel::Error,
+            "AndroidRuntime",
+            "\tat com.example.A.b(A.java:1)",
+        );
         let e3 = android_entry(LogLevel::Info, "System", "normal");
 
         let indexed: Vec<(usize, &LogEntry)> = vec![(500, &e1), (501, &e2), (502, &e3)];

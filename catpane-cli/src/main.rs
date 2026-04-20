@@ -178,17 +178,9 @@ impl eframe::App for CatPaneApp {
             };
 
             if let Some(result) = location_result {
-                let device_id = self
-                    .app
-                    .location_pending
-                    .take()
-                    .map(|(id, _)| id);
+                let device_id = self.app.location_pending.take().map(|(id, _)| id);
                 if let Some(device_id) = device_id {
-                    let state = self
-                        .app
-                        .device_locations
-                        .entry(device_id)
-                        .or_default();
+                    let state = self.app.device_locations.entry(device_id).or_default();
                     match result {
                         Ok(message) => state.status = Some((true, message)),
                         Err(message) => state.status = Some((false, message)),
