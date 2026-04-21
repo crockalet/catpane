@@ -442,7 +442,12 @@ impl App {
             return false;
         };
 
-        let mut handle = capture::spawn_capture(&self.rt, &device, None);
+        let mut handle = capture::spawn_capture(
+            &self.rt,
+            &device,
+            None,
+            capture::CaptureScope::default(),
+        );
         let controller = handle.controller();
         let (tx, _) = broadcast::channel::<LogEntry>(4096);
         let fanout_tx = tx.clone();

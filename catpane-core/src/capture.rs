@@ -12,6 +12,24 @@ use crate::{
     log_entry::{LogEntry, parse_ios_log_ndjson_line, parse_ios_syslog_line, parse_logcat_line},
 };
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureScope {
+    pub process: Option<String>,
+    pub text: Option<String>,
+    pub predicate: Option<String>,
+    pub quiet: bool,
+}
+
+impl CaptureScope {
+    pub fn is_empty(&self) -> bool {
+        self.process.is_none() && self.text.is_none() && self.predicate.is_none() && !self.quiet
+    }
+
+    pub fn is_explicitly_scoped(&self) -> bool {
+        self.process.is_some() || self.text.is_some() || self.predicate.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DevicePlatform {
@@ -285,11 +303,12 @@ pub fn spawn_capture(
     rt: &tokio::runtime::Handle,
     device: &ConnectedDevice,
     pid_filter: Option<u32>,
+    scope: CaptureScope,
 ) -> CaptureHandle {
     match device.platform {
         DevicePlatform::Android => spawn_android_capture(rt, device.id.clone(), pid_filter),
-        DevicePlatform::IosDevice => spawn_ios_device_capture(rt, device.id.clone()),
-        DevicePlatform::IosSimulator => spawn_ios_simulator_capture(rt, device.id.clone()),
+        DevicePlatform::IosDevice => spawn_ios_device_capture(rt, device.id.clone(), scope),
+        DevicePlatform::IosSimulator => spawn_ios_simulator_capture(rt, device.id.clone(), scope),
     }
 }
 
@@ -360,7 +379,11 @@ fn spawn_android_capture(
     CaptureHandle { rx, controller }
 }
 
-fn spawn_ios_simulator_capture(rt: &tokio::runtime::Handle, udid: String) -> CaptureHandle {
+fn spawn_ios_simulator_capture(
+    rt: &tokio::runtime::Handle,
+    udid: String,
+    scope: CaptureScope,
+) -> CaptureHandle {
     let (tx, rx) = mpsc::channel::<LogEntry>(4096);
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let (completion_tx, completion_rx) = watch::channel(false);
@@ -371,10 +394,9 @@ fn spawn_ios_simulator_capture(rt: &tokio::runtime::Handle, udid: String) -> Cap
 
     rt.spawn(async move {
         let _completion = CompletionSignal::new(completion_tx);
+        let args = build_ios_simulator_capture_args(&udid, &scope);
         let mut child = match Command::new("xcrun")
-            .args([
-                "simctl", "spawn", &udid, "log", "stream", "--style", "ndjson", "--level", "debug",
-            ])
+            .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -412,7 +434,11 @@ fn spawn_ios_simulator_capture(rt: &tokio::runtime::Handle, udid: String) -> Cap
     CaptureHandle { rx, controller }
 }
 
-fn spawn_ios_device_capture(rt: &tokio::runtime::Handle, udid: String) -> CaptureHandle {
+fn spawn_ios_device_capture(
+    rt: &tokio::runtime::Handle,
+    udid: String,
+    scope: CaptureScope,
+) -> CaptureHandle {
     let (tx, rx) = mpsc::channel::<LogEntry>(4096);
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let (completion_tx, completion_rx) = watch::channel(false);
@@ -423,8 +449,9 @@ fn spawn_ios_device_capture(rt: &tokio::runtime::Handle, udid: String) -> Captur
 
     rt.spawn(async move {
         let _completion = CompletionSignal::new(completion_tx);
+        let args = build_ios_device_capture_args(&udid, &scope);
         let mut child = match Command::new(ios_device::idevicesyslog_binary())
-            .args(["-u", &udid])
+            .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -462,6 +489,74 @@ fn spawn_ios_device_capture(rt: &tokio::runtime::Handle, udid: String) -> Captur
     CaptureHandle { rx, controller }
 }
 
+fn build_ios_simulator_capture_args(udid: &str, scope: &CaptureScope) -> Vec<String> {
+    let mut args = vec![
+        "simctl".to_string(),
+        "spawn".to_string(),
+        udid.to_string(),
+        "log".to_string(),
+        "stream".to_string(),
+        "--style".to_string(),
+        "ndjson".to_string(),
+        "--level".to_string(),
+        "debug".to_string(),
+    ];
+
+    if let Some(predicate) = build_ios_simulator_predicate(scope) {
+        args.push("--predicate".to_string());
+        args.push(predicate);
+    } else if let Some(process) = scope.process.as_deref() {
+        args.push("--process".to_string());
+        args.push(process.to_string());
+    }
+
+    args
+}
+
+fn build_ios_simulator_predicate(scope: &CaptureScope) -> Option<String> {
+    let mut clauses = Vec::new();
+
+    if (scope.text.is_some() || scope.predicate.is_some())
+        && let Some(process) = scope.process.as_deref()
+    {
+        clauses.push(format!("process == {}", quote_predicate_string(process)));
+    }
+    if let Some(text) = scope.text.as_deref() {
+        clauses.push(format!(
+            "composedMessage CONTAINS[c] {}",
+            quote_predicate_string(text)
+        ));
+    }
+    if let Some(predicate) = scope.predicate.as_deref() {
+        clauses.push(format!("({predicate})"));
+    }
+
+    (!clauses.is_empty()).then(|| clauses.join(" AND "))
+}
+
+fn build_ios_device_capture_args(udid: &str, scope: &CaptureScope) -> Vec<String> {
+    let mut args = vec!["-u".to_string(), udid.to_string()];
+
+    if scope.quiet {
+        args.push("--quiet".to_string());
+    }
+    if let Some(process) = scope.process.as_deref() {
+        args.push("--process".to_string());
+        args.push(process.to_string());
+    }
+    if let Some(text) = scope.text.as_deref() {
+        args.push("--match".to_string());
+        args.push(text.to_string());
+    }
+
+    args
+}
+
+fn quote_predicate_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 struct CompletionSignal {
     tx: Option<watch::Sender<bool>>,
 }
@@ -489,5 +584,118 @@ async fn wait_for_completion(mut completion_rx: watch::Receiver<bool>) {
         if *completion_rx.borrow() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulator_process_scope_uses_process_flag() {
+        let args = build_ios_simulator_capture_args(
+            "SIM-1",
+            &CaptureScope {
+                process: Some("MyApp".into()),
+                ..CaptureScope::default()
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "simctl",
+                "spawn",
+                "SIM-1",
+                "log",
+                "stream",
+                "--style",
+                "ndjson",
+                "--level",
+                "debug",
+                "--process",
+                "MyApp",
+            ]
+        );
+    }
+
+    #[test]
+    fn simulator_text_and_process_scope_builds_predicate() {
+        let args = build_ios_simulator_capture_args(
+            "SIM-1",
+            &CaptureScope {
+                process: Some("MyApp".into()),
+                text: Some("timeout".into()),
+                ..CaptureScope::default()
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "simctl",
+                "spawn",
+                "SIM-1",
+                "log",
+                "stream",
+                "--style",
+                "ndjson",
+                "--level",
+                "debug",
+                "--predicate",
+                "process == \"MyApp\" AND composedMessage CONTAINS[c] \"timeout\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn simulator_user_predicate_is_combined_with_generated_filters() {
+        let args = build_ios_simulator_capture_args(
+            "SIM-1",
+            &CaptureScope {
+                process: Some("MyApp".into()),
+                predicate: Some("subsystem == \"com.example.app\"".into()),
+                ..CaptureScope::default()
+            },
+        );
+
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("process == \"MyApp\" AND (subsystem == \"com.example.app\")")
+        );
+    }
+
+    #[test]
+    fn device_scope_uses_idevicesyslog_filters() {
+        let args = build_ios_device_capture_args(
+            "DEVICE-1",
+            &CaptureScope {
+                process: Some("MyApp".into()),
+                text: Some("timeout".into()),
+                predicate: Some("ignored".into()),
+                quiet: true,
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-u",
+                "DEVICE-1",
+                "--quiet",
+                "--process",
+                "MyApp",
+                "--match",
+                "timeout",
+            ]
+        );
+    }
+
+    #[test]
+    fn predicate_escaping_handles_quotes_and_backslashes() {
+        assert_eq!(
+            quote_predicate_string("say \"hi\" \\ now"),
+            "\"say \\\"hi\\\" \\\\ now\""
+        );
     }
 }

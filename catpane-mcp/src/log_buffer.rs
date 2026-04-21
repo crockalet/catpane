@@ -144,7 +144,7 @@ pub struct BufferedLogEntry {
 }
 
 impl BufferedLogEntry {
-    fn new(seq: u64, entry: LogEntry) -> Self {
+    pub(crate) fn new(seq: u64, entry: LogEntry) -> Self {
         let normalized_timestamp = NormalizedTimestamp::parse(&entry.timestamp).ok();
         Self {
             seq,
@@ -322,6 +322,10 @@ impl LogBuffer {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn snapshot_entries(&self) -> Vec<BufferedLogEntry> {
+        self.entries.iter().cloned().collect()
     }
 
     pub fn meta(&self) -> LogBufferMeta {

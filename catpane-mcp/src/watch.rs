@@ -1,11 +1,14 @@
 use catpane_core::log_entry::{LogEntry, LogLevel};
 use regex::Regex;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::log_buffer::BufferedLogEntry;
+
 static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_MATCH_RETENTION_CAPACITY: usize = 2_048;
 
 fn next_watch_id() -> String {
     format!("w{}", NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed))
@@ -37,6 +40,9 @@ pub struct Watch {
     pub match_count: u64,
     pub last_match_seq: Option<u64>,
     pub created_at_ms: u64,
+    retained_matches: VecDeque<BufferedLogEntry>,
+    retained_match_capacity: usize,
+    retained_dropped: u64,
 }
 
 impl Watch {
@@ -45,6 +51,22 @@ impl Watch {
         pattern: String,
         tag: Option<String>,
         min_level: Option<LogLevel>,
+    ) -> Self {
+        Self::new_text_with_retention(
+            name,
+            pattern,
+            tag,
+            min_level,
+            DEFAULT_MATCH_RETENTION_CAPACITY,
+        )
+    }
+
+    pub fn new_text_with_retention(
+        name: String,
+        pattern: String,
+        tag: Option<String>,
+        min_level: Option<LogLevel>,
+        retained_match_capacity: usize,
     ) -> Self {
         Self {
             id: next_watch_id(),
@@ -57,6 +79,9 @@ impl Watch {
             match_count: 0,
             last_match_seq: None,
             created_at_ms: now_ms(),
+            retained_matches: VecDeque::with_capacity(retained_match_capacity.max(1)),
+            retained_match_capacity: retained_match_capacity.max(1),
+            retained_dropped: 0,
         }
     }
 
@@ -65,6 +90,22 @@ impl Watch {
         pattern: &str,
         tag: Option<String>,
         min_level: Option<LogLevel>,
+    ) -> Result<Self, String> {
+        Self::new_regex_with_retention(
+            name,
+            pattern,
+            tag,
+            min_level,
+            DEFAULT_MATCH_RETENTION_CAPACITY,
+        )
+    }
+
+    pub fn new_regex_with_retention(
+        name: String,
+        pattern: &str,
+        tag: Option<String>,
+        min_level: Option<LogLevel>,
+        retained_match_capacity: usize,
     ) -> Result<Self, String> {
         let re = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
         Ok(Self {
@@ -78,6 +119,9 @@ impl Watch {
             match_count: 0,
             last_match_seq: None,
             created_at_ms: now_ms(),
+            retained_matches: VecDeque::with_capacity(retained_match_capacity.max(1)),
+            retained_match_capacity: retained_match_capacity.max(1),
+            retained_dropped: 0,
         })
     }
 
@@ -117,15 +161,35 @@ impl Watch {
         }
     }
 
-    /// Test + update stats. Returns true if matched.
-    pub fn check(&mut self, seq: u64, entry: &LogEntry) -> bool {
-        if self.matches(entry) {
-            self.match_count += 1;
-            self.last_match_seq = Some(seq);
-            true
-        } else {
-            false
+    /// Record a matching buffered entry into the retained side buffer.
+    pub fn retain_if_match(&mut self, buffered: &BufferedLogEntry) -> bool {
+        if !self.matches(&buffered.entry) {
+            return false;
         }
+
+        self.record_match(buffered.clone())
+    }
+
+    pub fn retained_matches_since(
+        &self,
+        since_seq: Option<u64>,
+        limit: usize,
+    ) -> Vec<BufferedLogEntry> {
+        self.retained_matches
+            .iter()
+            .filter(|buffered| since_seq.is_none_or(|seq| buffered.seq > seq))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear_matches(&mut self) -> usize {
+        let cleared = self.retained_matches.len();
+        self.retained_matches.clear();
+        self.match_count = 0;
+        self.last_match_seq = None;
+        self.retained_dropped = 0;
+        cleared
     }
 
     pub fn summary(&self) -> WatchSummary {
@@ -138,11 +202,33 @@ impl Watch {
             min_level: self.min_level.map(|l| l.label().to_string()),
             match_count: self.match_count,
             last_match_seq: self.last_match_seq,
+            retained_count: self.retained_matches.len(),
+            retained_capacity: self.retained_match_capacity,
+            retained_dropped: self.retained_dropped,
         }
     }
 
     pub fn pattern_display(&self) -> &str {
         self.text_pattern.as_deref().unwrap_or("")
+    }
+
+    fn record_match(&mut self, buffered: BufferedLogEntry) -> bool {
+        if self
+            .retained_matches
+            .iter()
+            .any(|existing| existing.seq == buffered.seq)
+        {
+            return false;
+        }
+
+        if self.retained_matches.len() == self.retained_match_capacity {
+            self.retained_matches.pop_front();
+            self.retained_dropped = self.retained_dropped.saturating_add(1);
+        }
+        self.match_count = self.match_count.saturating_add(1);
+        self.last_match_seq = Some(buffered.seq);
+        self.retained_matches.push_back(buffered);
+        true
     }
 }
 
@@ -157,6 +243,17 @@ pub struct WatchSummary {
     pub min_level: Option<String>,
     pub match_count: u64,
     pub last_match_seq: Option<u64>,
+    pub retained_count: usize,
+    pub retained_capacity: usize,
+    pub retained_dropped: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WatchRetentionStats {
+    pub watch_count: usize,
+    pub retained_count: usize,
+    pub retained_capacity: usize,
+    pub retained_dropped: u64,
 }
 
 #[derive(Debug, Default)]
@@ -193,6 +290,57 @@ impl WatchSet {
         summaries
     }
 
+    pub fn record_entry(&mut self, buffered: &BufferedLogEntry) {
+        for watch in self.watches.values_mut() {
+            watch.retain_if_match(buffered);
+        }
+    }
+
+    pub fn seed_matches(&mut self, id: &str, entries: &[BufferedLogEntry]) -> usize {
+        let Some(watch) = self.watches.get_mut(id) else {
+            return 0;
+        };
+
+        let mut seeded = 0;
+        for buffered in entries {
+            if watch.retain_if_match(buffered) {
+                seeded += 1;
+            }
+        }
+        seeded
+    }
+
+    pub fn retained_matches(
+        &self,
+        id: &str,
+        since_seq: Option<u64>,
+        limit: usize,
+    ) -> Option<Vec<BufferedLogEntry>> {
+        self.get(id)
+            .map(|watch| watch.retained_matches_since(since_seq, limit))
+    }
+
+    pub fn clear_matches(&mut self) -> usize {
+        self.watches
+            .values_mut()
+            .map(Watch::clear_matches)
+            .sum::<usize>()
+    }
+
+    pub fn retention_stats(&self) -> WatchRetentionStats {
+        self.watches
+            .values()
+            .fold(WatchRetentionStats::default(), |mut stats, watch| {
+                stats.watch_count += 1;
+                stats.retained_count += watch.retained_matches.len();
+                stats.retained_capacity += watch.retained_match_capacity;
+                stats.retained_dropped = stats
+                    .retained_dropped
+                    .saturating_add(watch.retained_dropped);
+                stats
+            })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.watches.is_empty()
     }
@@ -219,6 +367,14 @@ mod tests {
             subsystem: None,
             category: None,
             message: message.to_string(),
+        }
+    }
+
+    fn make_buffered_entry(seq: u64, level: LogLevel, tag: &str, message: &str) -> BufferedLogEntry {
+        BufferedLogEntry {
+            seq,
+            normalized_timestamp: None,
+            entry: make_entry(level, tag, message),
         }
     }
 
@@ -261,21 +417,46 @@ mod tests {
     }
 
     #[test]
-    fn check_updates_stats() {
-        let mut w = Watch::new_text("t".into(), "hit".into(), None, None);
+    fn retain_if_match_updates_stats() {
+        let mut w = Watch::new_text_with_retention("t".into(), "hit".into(), None, None, 8);
         assert_eq!(w.match_count, 0);
         assert!(w.last_match_seq.is_none());
 
-        assert!(w.check(10, &make_entry(LogLevel::Info, "A", "hit me")));
+        assert!(w.retain_if_match(&make_buffered_entry(10, LogLevel::Info, "A", "hit me")));
         assert_eq!(w.match_count, 1);
         assert_eq!(w.last_match_seq, Some(10));
 
-        assert!(!w.check(11, &make_entry(LogLevel::Info, "A", "miss")));
+        assert!(!w.retain_if_match(&make_buffered_entry(11, LogLevel::Info, "A", "miss")));
         assert_eq!(w.match_count, 1);
 
-        assert!(w.check(20, &make_entry(LogLevel::Info, "A", "hit again")));
+        assert!(w.retain_if_match(&make_buffered_entry(20, LogLevel::Info, "A", "hit again")));
         assert_eq!(w.match_count, 2);
         assert_eq!(w.last_match_seq, Some(20));
+    }
+
+    #[test]
+    fn retained_matches_survive_capacity_eviction() {
+        let mut w = Watch::new_text_with_retention("t".into(), "hit".into(), None, None, 2);
+
+        assert!(w.retain_if_match(&make_buffered_entry(1, LogLevel::Info, "A", "hit one")));
+        assert!(w.retain_if_match(&make_buffered_entry(2, LogLevel::Info, "A", "hit two")));
+        assert!(w.retain_if_match(&make_buffered_entry(3, LogLevel::Info, "A", "hit three")));
+
+        let retained = w.retained_matches_since(None, 10);
+        assert_eq!(retained.iter().map(|entry| entry.seq).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(w.summary().retained_dropped, 1);
+    }
+
+    #[test]
+    fn clear_matches_resets_retained_state() {
+        let mut w = Watch::new_text_with_retention("t".into(), "hit".into(), None, None, 2);
+        assert!(w.retain_if_match(&make_buffered_entry(1, LogLevel::Info, "A", "hit")));
+
+        assert_eq!(w.clear_matches(), 1);
+        let summary = w.summary();
+        assert_eq!(summary.match_count, 0);
+        assert!(summary.last_match_seq.is_none());
+        assert_eq!(summary.retained_count, 0);
     }
 
     #[test]

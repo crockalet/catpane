@@ -1,6 +1,6 @@
 # `get_logs`
 
-Use `get_logs` to query buffered iOS simulator console log entries from an existing capture. It is optimized for targeted retrieval, not bulk dumping.
+Use `get_logs` to query buffered iOS log entries from an existing capture. It is optimized for targeted retrieval, not bulk dumping.
 
 ## Core arguments
 
@@ -107,5 +107,6 @@ These filters combine with `minLevel`, `text`, and `since` using AND semantics.
 ## Notes
 
 - If more than one capture exists, do not rely on an unqualified call; pass `captureId` or `device`.
-- `entries[]` are buffered logs only. If `capture.buffer.dropped` grows or the buffer is near capacity, older logs may already be gone.
+- `entries[]` come from the main ring buffer. If `capture.buffer.dropped` grows or the buffer is near capacity, older non-pinned logs may already be gone.
+- For long or noisy iOS sessions, pair this with `create_watch` + `get_watch_matches` so relevant lines survive main-buffer churn.
 - Response pagination fields live under `page`: `returned`, `firstSeq`, `lastSeq`, `nextCursor`, `hasMore`.

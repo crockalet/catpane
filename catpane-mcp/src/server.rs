@@ -13,6 +13,8 @@ use crate::protocol::{
 };
 use crate::tools::{McpRuntimeState, handle_tool_call, tool_definitions};
 
+const MCP_WORKFLOW_INSTRUCTIONS: &str = "For iOS debugging, avoid broad unscoped captures when possible. Start with get_status, then prefer start_capture with explicit device plus process/text/predicate scope, call clear_logs before a fresh reproduction, and create_watch for the app process or error text so relevant lines survive main-buffer overflow. Use get_watch_matches for high-signal polling, get_crashes for structured crash checks, and small filtered get_logs calls for broader context.";
+
 pub async fn run_stdio_server(rt: tokio::runtime::Handle) -> Result<(), String> {
     let stdin = BufReader::new(io::stdin());
     let stdout = BufWriter::new(io::stdout());
@@ -135,7 +137,8 @@ impl StdioMcpServer {
                 self.server_info.clone(),
                 ServerCapabilities::with_tools(false),
             )
-            .with_protocol_version(protocol_version),
+            .with_protocol_version(protocol_version)
+            .with_instructions(MCP_WORKFLOW_INSTRUCTIONS),
         )?;
         self.initialize_seen = true;
         Ok(response)

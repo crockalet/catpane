@@ -1,6 +1,6 @@
 # `get_status`
 
-Use `get_status` as the default first call. It shows what captures exist, whether they are running, and how full each buffer is.
+Use `get_status` as the default first call. It shows what captures exist, whether they are running, how full each buffer is, whether the capture is scoped, and whether retained watch matches are active.
 
 ## Common arguments
 
@@ -40,6 +40,9 @@ Use `get_status` as the default first call. It shows what captures exist, whethe
 - `captures[].running`
 - `captures[].device` and `captures[].captureId`
 - `captures[].buffer.len`, `captures[].buffer.capacity`, and `captures[].buffer.dropped`
+- `captures[].scope.scoped` plus any `scope.process`, `scope.text`, `scope.predicate`, `scope.quiet`
+- `captures[].retainedMatches.watchCount`, `captures[].retainedMatches.retainedCount`, and `captures[].retainedMatches.retainedDropped`
+- `captures[].warnings[]` — treat these as advice to narrow scope or add a watch before logs disappear
 - `captures[].parsedEntries` and `captures[].parseErrors`
 - `devices[]` when `includeDevices` is `true`
 - `devices[].platform` — use `"iOS"` entries for this skill

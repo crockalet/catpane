@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use catpane_core::{
-    capture::{self, ConnectedDevice, DevicePlatform},
-    log_buffer_config::DEFAULT_LOG_BUFFER_CAPACITY,
+    capture::{self, CaptureScope, ConnectedDevice, DevicePlatform},
+    log_buffer_config::log_buffer_capacity,
     log_entry::LogLevel,
 };
 
@@ -51,6 +51,7 @@ pub const DEFAULT_GET_CRASHES_LIMIT: usize = 10;
 const CAPTURE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_CAPTURE_REASON: &str = "stopped by stop_capture";
 const RESTART_CAPTURE_REASON: &str = "stopped for restart";
+const HOT_BUFFER_UTILIZATION_PCT: usize = 90;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,6 +177,14 @@ pub struct StartCaptureArgs {
     pub package: Option<String>,
     #[serde(default)]
     pub capacity: Option<usize>,
+    #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
+    #[serde(default)]
+    pub quiet: bool,
     #[serde(default)]
     pub restart: bool,
 }
@@ -606,6 +615,51 @@ impl From<LogBufferMeta> for LogBufferStatus {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CaptureScopeStatus {
+    pub scoped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
+    pub quiet: bool,
+}
+
+impl From<&CaptureScope> for CaptureScopeStatus {
+    fn from(value: &CaptureScope) -> Self {
+        Self {
+            scoped: value.is_explicitly_scoped(),
+            process: value.process.clone(),
+            text: value.text.clone(),
+            predicate: value.predicate.clone(),
+            quiet: value.quiet,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchRetentionStatus {
+    pub watch_count: usize,
+    pub retained_count: usize,
+    pub retained_capacity: usize,
+    pub retained_dropped: u64,
+}
+
+impl From<crate::watch::WatchRetentionStats> for WatchRetentionStatus {
+    fn from(value: crate::watch::WatchRetentionStats) -> Self {
+        Self {
+            watch_count: value.watch_count,
+            retained_count: value.retained_count,
+            retained_capacity: value.retained_capacity,
+            retained_dropped: value.retained_dropped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CaptureStatus {
     pub capture_id: String,
     pub device: String,
@@ -625,6 +679,9 @@ pub struct CaptureStatus {
     pub parsed_entries: u64,
     pub parse_errors: u64,
     pub buffer: LogBufferStatus,
+    pub scope: CaptureScopeStatus,
+    pub retained_matches: WatchRetentionStatus,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -726,6 +783,7 @@ pub struct StopCaptureResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ClearLogsResponse {
     pub cleared_entries: usize,
+    pub cleared_retained_matches: usize,
     pub capture: CaptureStatus,
 }
 
@@ -786,7 +844,7 @@ impl Default for McpRuntimeState {
 
 impl McpRuntimeState {
     pub fn new() -> Self {
-        Self::with_buffer_capacity(DEFAULT_LOG_BUFFER_CAPACITY)
+        Self::with_buffer_capacity(log_buffer_capacity())
     }
 
     pub fn with_buffer_capacity(default_buffer_capacity: usize) -> Self {
@@ -828,7 +886,8 @@ impl McpRuntimeState {
         rt: &Handle,
         args: StartCaptureArgs,
     ) -> Result<StartCaptureResponse, McpToolError> {
-        let device = resolve_connected_device(args.device).await?;
+        let device = resolve_connected_device(args.device.clone()).await?;
+        let capture_scope = resolve_capture_scope(&device, &args)?;
         let package = normalize_optional_string(args.package);
         let pid_filter = resolve_pid_filter(&device, args.pid, package.as_deref()).await?;
         let capacity = args.capacity.unwrap_or(self.default_buffer_capacity);
@@ -860,9 +919,10 @@ impl McpRuntimeState {
                 device.platform,
                 package.clone(),
                 pid_filter,
+                capture_scope.clone(),
                 capacity,
             ));
-            let mut stream = capture::spawn_capture(rt, &device, pid_filter);
+            let mut stream = capture::spawn_capture(rt, &device, pid_filter, capture_scope);
             let capture_control = stream.controller();
             let (pump_done_tx, pump_done) = watch::channel(false);
             let shared_for_task = Arc::clone(&shared);
@@ -1016,11 +1076,24 @@ impl McpRuntimeState {
             .as_deref()
             .map(parse_log_level)
             .transpose()?;
+        let retention_capacity = shared.watch_retention_capacity;
 
         let watch = match args.pattern_type.as_str() {
-            "text" => crate::watch::Watch::new_text(name.clone(), pattern, tag, min_level),
-            "regex" => crate::watch::Watch::new_regex(name.clone(), &pattern, tag, min_level)
-                .map_err(McpToolError::invalid_params)?,
+            "text" => crate::watch::Watch::new_text_with_retention(
+                name.clone(),
+                pattern,
+                tag,
+                min_level,
+                retention_capacity,
+            ),
+            "regex" => crate::watch::Watch::new_regex_with_retention(
+                name.clone(),
+                &pattern,
+                tag,
+                min_level,
+                retention_capacity,
+            )
+            .map_err(McpToolError::invalid_params)?,
             other => {
                 return Err(McpToolError::invalid_params(format!(
                     "pattern_type must be \"text\" or \"regex\", got \"{other}\""
@@ -1028,9 +1101,16 @@ impl McpRuntimeState {
             }
         };
 
+        let buffered_entries = {
+            let buffer = lock_recover(&shared.buffer);
+            buffer.snapshot_entries()
+        };
+
         let watch_id = {
             let mut watches = lock_recover(&shared.watches);
-            watches.add(watch)
+            let watch_id = watches.add(watch);
+            watches.seed_matches(&watch_id, &buffered_entries);
+            watch_id
         };
 
         Ok(CreateWatchResponse { watch_id, name })
@@ -1077,40 +1157,21 @@ impl McpRuntimeState {
             )));
         }
 
-        // Clone the watch so we can release the watches lock before scanning the buffer.
-        let watch_clone = {
+        let (matched_entries, summary) = {
             let watches = lock_recover(&shared.watches);
-            watches
-                .get(&args.watch_id)
+            let matched_entries = watches
+                .retained_matches(&args.watch_id, args.since_seq, limit)
                 .ok_or_else(|| {
                     McpToolError::not_found(format!("watch `{}` was not found", args.watch_id))
-                })?
-                .clone()
-        };
-
-        let matched_entries = {
-            let buffer = lock_recover(&shared.buffer);
-            buffer.scan_matching(args.since_seq, limit, |entry| watch_clone.matches(entry))
+                })?;
+            let summary = watches
+                .get(&args.watch_id)
+                .expect("retained_matches returned some but watch disappeared")
+                .summary();
+            (matched_entries, summary)
         };
 
         let match_count = matched_entries.len();
-        let last_matched_seq = matched_entries.last().map(|e| e.seq);
-
-        // Update stats on the real watch for newly matched entries.
-        let summary = {
-            let mut watches = lock_recover(&shared.watches);
-            if let Some(watch) = watches.get_mut(&args.watch_id) {
-                watch.match_count = watch.match_count.saturating_add(match_count as u64);
-                if let Some(seq) = last_matched_seq {
-                    if watch.last_match_seq.is_none_or(|prev| seq > prev) {
-                        watch.last_match_seq = Some(seq);
-                    }
-                }
-                watch.summary()
-            } else {
-                watch_clone.summary()
-            }
-        };
 
         Ok(GetWatchMatchesResponse {
             entries: matched_entries
@@ -1446,9 +1507,10 @@ impl Drop for CaptureRuntime {
 
 impl CaptureRuntime {
     fn clear_logs(&self) -> ClearLogsResponse {
-        let cleared_entries = self.shared.clear_logs();
+        let (cleared_entries, cleared_retained_matches) = self.shared.clear_logs();
         ClearLogsResponse {
             cleared_entries,
+            cleared_retained_matches,
             capture: self.snapshot(),
         }
     }
@@ -1551,10 +1613,12 @@ struct CaptureShared {
     platform: DevicePlatform,
     package: Option<String>,
     pid_filter: Option<u32>,
+    scope: CaptureScope,
     started_at_ms: u64,
     buffer: Mutex<LogBuffer>,
     stats: Mutex<CaptureStats>,
     watches: Mutex<crate::watch::WatchSet>,
+    watch_retention_capacity: usize,
 }
 
 impl CaptureShared {
@@ -1564,6 +1628,7 @@ impl CaptureShared {
         platform: DevicePlatform,
         package: Option<String>,
         pid_filter: Option<u32>,
+        scope: CaptureScope,
         capacity: usize,
     ) -> Self {
         Self {
@@ -1572,28 +1637,44 @@ impl CaptureShared {
             platform,
             package,
             pid_filter,
+            scope,
             started_at_ms: now_epoch_ms(),
             buffer: Mutex::new(LogBuffer::new(capacity)),
             stats: Mutex::new(CaptureStats::default()),
             watches: Mutex::new(crate::watch::WatchSet::new()),
+            watch_retention_capacity: watch_retention_capacity(capacity),
         }
     }
 
     fn append_entry(&self, entry: catpane_core::log_entry::LogEntry) {
-        {
+        let buffered = {
             let mut buffer = lock_recover(&self.buffer);
-            buffer.append(entry);
+            let seq = buffer.append(entry.clone());
+            BufferedLogEntry::new(seq, entry)
+        };
+        {
+            let mut watches = lock_recover(&self.watches);
+            watches.record_entry(&buffered);
         }
-        let mut stats = lock_recover(&self.stats);
-        stats.ingested_lines = stats.ingested_lines.saturating_add(1);
-        stats.parsed_entries = stats.parsed_entries.saturating_add(1);
+        {
+            let mut stats = lock_recover(&self.stats);
+            stats.ingested_lines = stats.ingested_lines.saturating_add(1);
+            stats.parsed_entries = stats.parsed_entries.saturating_add(1);
+        }
     }
 
-    fn clear_logs(&self) -> usize {
-        let mut buffer = lock_recover(&self.buffer);
-        let cleared_entries = buffer.len();
-        buffer.clear();
-        cleared_entries
+    fn clear_logs(&self) -> (usize, usize) {
+        let cleared_entries = {
+            let mut buffer = lock_recover(&self.buffer);
+            let cleared_entries = buffer.len();
+            buffer.clear();
+            cleared_entries
+        };
+        let cleared_retained_matches = {
+            let mut watches = lock_recover(&self.watches);
+            watches.clear_matches()
+        };
+        (cleared_entries, cleared_retained_matches)
     }
 
     fn query(&self, query: &LogQuery) -> LogPage {
@@ -1628,7 +1709,12 @@ impl CaptureShared {
             let buffer = lock_recover(&self.buffer);
             LogBufferStatus::from(buffer.meta())
         };
+        let retained_matches = {
+            let watches = lock_recover(&self.watches);
+            WatchRetentionStatus::from(watches.retention_stats())
+        };
         let stats = lock_recover(&self.stats);
+        let warnings = capture_warnings(self.platform, &self.scope, &buffer, &retained_matches);
 
         CaptureStatus {
             capture_id: capture_id.to_owned(),
@@ -1645,6 +1731,9 @@ impl CaptureShared {
             parsed_entries: stats.parsed_entries,
             parse_errors: stats.parse_errors,
             buffer,
+            scope: CaptureScopeStatus::from(&self.scope),
+            retained_matches,
+            warnings,
         }
     }
 }
@@ -1711,7 +1800,7 @@ fn get_logs_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Read buffered capture entries with cursor pagination and CatPane filters.")
+    .with_description("Read buffered capture entries with cursor pagination and CatPane filters. For noisy long-running captures, use create_watch/get_watch_matches to pin high-signal lines beyond main-buffer eviction.")
 }
 
 fn clear_logs_tool() -> Tool {
@@ -1731,7 +1820,7 @@ fn clear_logs_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Clear buffered log entries for a capture without stopping it.")
+    .with_description("Clear the main log buffer and any retained watch matches for a capture without stopping it. Use this before reproducing an issue to get a clean observation window.")
 }
 
 fn start_capture_tool() -> Tool {
@@ -1756,6 +1845,31 @@ fn start_capture_tool() -> Tool {
                     ),
                 ),
                 (
+                    "process",
+                    string_property(
+                        "Scope an iOS capture to one process. On simulators this becomes a source filter; on physical iOS it maps to idevicesyslog --process.",
+                    ),
+                ),
+                (
+                    "text",
+                    string_property(
+                        "Scope an iOS capture to messages containing this text. On simulators this becomes a log predicate; on physical iOS it maps to idevicesyslog --match.",
+                    ),
+                ),
+                (
+                    "predicate",
+                    string_property(
+                        "Additional NSPredicate expression for iOS simulator captures. Combined with process/text scope using AND semantics.",
+                    ),
+                ),
+                (
+                    "quiet",
+                    json!({
+                        "type": "boolean",
+                        "description": "Reduce noisy physical-iOS processes at the source using idevicesyslog --quiet."
+                    }),
+                ),
+                (
                     "capacity",
                     json!({
                         "type": "integer",
@@ -1774,7 +1888,7 @@ fn start_capture_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Start a new Android, iOS simulator, or wired iOS device capture and buffer it for later MCP queries.")
+    .with_description("Start a new Android or iOS capture. For iOS, prefer process/text/predicate scope up front so irrelevant logs never evict the useful ones.")
 }
 
 fn stop_capture_tool() -> Tool {
@@ -1812,7 +1926,7 @@ fn get_status_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Inspect registered captures, buffer usage, and optional connected-device state.")
+    .with_description("Inspect registered captures, buffer usage, scope, retained watch matches, advisory warnings, and optional connected-device state.")
 }
 
 fn list_packages_tool() -> Tool {
@@ -1973,7 +2087,7 @@ fn create_watch_tool() -> Tool {
             &["name", "pattern"],
         ),
     )
-    .with_description("Register a named pattern watch on a capture. The watch tracks log entries matching the pattern.")
+    .with_description("Register a named pattern watch on a capture. Matching entries are retained separately so they can survive main-buffer overflow.")
 }
 
 fn list_watches_tool() -> Tool {
@@ -1993,7 +2107,7 @@ fn list_watches_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("List all active watches on a capture.")
+    .with_description("List all active watches on a capture, including retained-match counts.")
 }
 
 fn get_watch_matches_tool() -> Tool {
@@ -2021,7 +2135,7 @@ fn get_watch_matches_tool() -> Tool {
             &["watchId"],
         ),
     )
-    .with_description("Get log entries matching a watch pattern. Scans the capture buffer for matches.")
+    .with_description("Get retained log entries that matched a watch pattern. These results survive main-buffer churn and are ideal for high-signal polling.")
 }
 
 fn delete_watch_tool() -> Tool {
@@ -2343,6 +2457,101 @@ async fn resolve_pid_filter(
     }
 }
 
+fn resolve_capture_scope(
+    device: &ConnectedDevice,
+    args: &StartCaptureArgs,
+) -> Result<CaptureScope, McpToolError> {
+    let scope = CaptureScope {
+        process: normalize_optional_string(args.process.clone()),
+        text: normalize_optional_string(args.text.clone()),
+        predicate: normalize_optional_string(args.predicate.clone()),
+        quiet: args.quiet,
+    };
+
+    match device.platform {
+        DevicePlatform::Android => {
+            if scope.is_empty() {
+                Ok(scope)
+            } else {
+                Err(McpToolError::invalid_params(
+                    "process, text, predicate, and quiet are only supported for iOS captures",
+                ))
+            }
+        }
+        DevicePlatform::IosSimulator => {
+            if scope.quiet {
+                return Err(McpToolError::invalid_params(
+                    "quiet is only supported for physical iOS captures",
+                ));
+            }
+            Ok(scope)
+        }
+        DevicePlatform::IosDevice => {
+            if scope.predicate.is_some() {
+                return Err(McpToolError::invalid_params(
+                    "predicate is only supported for iOS simulator captures",
+                ));
+            }
+            Ok(scope)
+        }
+    }
+}
+
+fn watch_retention_capacity(main_capacity: usize) -> usize {
+    (main_capacity / 10).clamp(256, 5_000)
+}
+
+fn capture_warnings(
+    platform: DevicePlatform,
+    scope: &CaptureScope,
+    buffer: &LogBufferStatus,
+    retained_matches: &WatchRetentionStatus,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let utilization_pct = if buffer.capacity == 0 {
+        0
+    } else {
+        buffer.len.saturating_mul(100) / buffer.capacity
+    };
+    let ios_capture = matches!(platform, DevicePlatform::IosDevice | DevicePlatform::IosSimulator);
+    let explicitly_scoped = scope.is_explicitly_scoped();
+
+    if buffer.dropped > 0 {
+        if ios_capture && !explicitly_scoped {
+            warnings.push(format!(
+                "Main buffer has already dropped {} older entries from an unscoped iOS capture. Restart with process/text/predicate scope, clear_logs before reproducing, and pin high-signal lines with create_watch/get_watch_matches.",
+                buffer.dropped
+            ));
+        } else {
+            warnings.push(format!(
+                "Main buffer has already dropped {} older entries. Use create_watch/get_watch_matches if you need important lines to outlive main-buffer eviction.",
+                buffer.dropped
+            ));
+        }
+    }
+
+    if ios_capture && !explicitly_scoped && utilization_pct >= HOT_BUFFER_UTILIZATION_PCT {
+        warnings.push(
+            "Unscoped iOS capture is near capacity. Add process/text/predicate scope or create a watch before the next reproduction.".to_string(),
+        );
+    }
+
+    if ios_capture && retained_matches.watch_count == 0 && buffer.dropped > 0 {
+        warnings.push(
+            "No watches are active, so only the main buffer is retaining lines. Create a watch for the app process, subsystem, or error text to keep relevant entries pinned.".to_string(),
+        );
+    }
+
+    if retained_matches.retained_dropped > 0 {
+        warnings.push(format!(
+            "Retained watch matches have also started evicting older entries ({} dropped). Narrow the watch or clear logs before the next reproduction.",
+            retained_matches.retained_dropped
+        ));
+    }
+
+    warnings
+}
+
 fn joined_device_serials(devices: &[ConnectedDevice]) -> String {
     devices
         .iter()
@@ -2477,6 +2686,15 @@ mod tests {
         }
     }
 
+    fn ios_device(id: &str, platform: DevicePlatform) -> ConnectedDevice {
+        ConnectedDevice {
+            id: id.to_owned(),
+            name: format!("iOS {id}"),
+            description: "Test iOS device".to_owned(),
+            platform,
+        }
+    }
+
     fn capture_runtime(capture_id: &str, device: &ConnectedDevice) -> CaptureRuntime {
         let (capture_control, _kill_rx, _completion_tx) =
             capture::CaptureController::test_controller();
@@ -2503,6 +2721,7 @@ mod tests {
                 device.platform,
                 None,
                 None,
+                CaptureScope::default(),
                 32,
             )),
             capture_control,
@@ -2596,5 +2815,56 @@ mod tests {
         assert_eq!(err.code, "conflict");
         assert!(err.message.contains("timed out"));
         assert!(err.message.contains("before restart"));
+    }
+
+    #[test]
+    fn resolve_capture_scope_rejects_android_ios_only_fields() {
+        let device = connected_device("android-1");
+        let args = StartCaptureArgs {
+            process: Some("MyApp".into()),
+            ..StartCaptureArgs::default()
+        };
+
+        let err = resolve_capture_scope(&device, &args).unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("only supported for iOS captures"));
+    }
+
+    #[test]
+    fn resolve_capture_scope_rejects_device_predicate() {
+        let device = ios_device("ios-1", DevicePlatform::IosDevice);
+        let args = StartCaptureArgs {
+            predicate: Some("process == \"MyApp\"".into()),
+            ..StartCaptureArgs::default()
+        };
+
+        let err = resolve_capture_scope(&device, &args).unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("simulator"));
+    }
+
+    #[test]
+    fn capture_warnings_flag_hot_unscoped_ios_capture() {
+        let warnings = capture_warnings(
+            DevicePlatform::IosDevice,
+            &CaptureScope::default(),
+            &LogBufferStatus {
+                capacity: 100,
+                len: 95,
+                dropped: 3,
+                next_seq: 10,
+                oldest_seq: Some(1),
+                newest_seq: Some(9),
+            },
+            &WatchRetentionStatus {
+                watch_count: 0,
+                retained_count: 0,
+                retained_capacity: 0,
+                retained_dropped: 0,
+            },
+        );
+
+        assert!(warnings.iter().any(|warning| warning.contains("unscoped iOS capture")));
+        assert!(warnings.iter().any(|warning| warning.contains("No watches are active")));
     }
 }

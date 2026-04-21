@@ -104,6 +104,11 @@ Available MCP tools:
 - `start_capture`
 - `stop_capture`
 - `get_status`
+- `get_crashes`
+- `create_watch`
+- `list_watches`
+- `get_watch_matches`
+- `delete_watch`
 
 Example MCP client config using stdio transport:
 
@@ -118,7 +123,7 @@ Example MCP client config using stdio transport:
 }
 ```
 
-Use `start_capture` to begin buffering logs for a device or iOS capture target, then query them with `get_logs`. `clear_logs` resets the current buffer without stopping capture, and `get_status` shows active captures plus buffer state. `get_logs` also supports iOS-specific `process`, `subsystem`, and `category` filters, though physical-device logs may not populate every field.
+Use `start_capture` to begin buffering logs for a device or iOS capture target, then query them with `get_logs`. For iOS captures, prefer `process`, `text`, and simulator `predicate` scope so irrelevant logs do not churn the main buffer. `clear_logs` resets the current observation window, `get_status` shows active captures plus scope/buffer warnings, `get_crashes` surfaces structured crash reports, and `create_watch` + `get_watch_matches` let agents pin high-signal lines so they survive main-buffer overflow. `get_logs` also supports iOS-specific `process`, `subsystem`, and `category` filters, though physical-device logs may not populate every field.
 
 ### Agent skill via `vercel-labs/skills`
 
