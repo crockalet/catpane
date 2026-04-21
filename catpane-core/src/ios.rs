@@ -1,12 +1,17 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::command::OneShotCommand;
+use crate::network_condition::{
+    NetworkConditionPreset, ios_network_throttling_enabled, ios_network_throttling_gate_message,
+};
 
 const SIMCTL_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SIMCTL_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const OPEN_SIMULATOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const IOS_NETWORK_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IosSimulator {
@@ -52,6 +57,109 @@ where
     S: Into<String>,
 {
     OneShotCommand::new("open", args, context, timeout)
+}
+
+fn bundled_app_dir_for_executable(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+
+    let app_dir = contents_dir.parent()?;
+    if app_dir.extension()? != std::ffi::OsStr::new("app") {
+        return None;
+    }
+
+    Some(app_dir.to_path_buf())
+}
+
+fn network_controller_binary() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CATPANE_NETWORK_CTL") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let executable = std::env::current_exe().ok()?;
+    let app_dir = bundled_app_dir_for_executable(&executable)?;
+    let contents_dir = app_dir.join("Contents");
+    let candidates = [
+        contents_dir
+            .join("MacOS")
+            .join("CatPaneThrottlingController"),
+        contents_dir.join("MacOS").join("catpane"),
+        contents_dir.join("MacOS").join("catpane-network-ctl"),
+        contents_dir
+            .join("Helpers")
+            .join("CatPaneThrottlingController"),
+        contents_dir.join("Helpers").join("catpane-network-ctl"),
+    ];
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn network_controller_command<I, S>(
+    args: I,
+    context: &'static str,
+) -> Result<OneShotCommand, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let Some(binary) = network_controller_binary() else {
+        return Err(
+            "iOS Simulator network throttling requires the bundled catpane-network-ctl helper, but no helper binary was found in the current app bundle. Rebuild CatPane with the native macOS network scaffold."
+                .to_string(),
+        );
+    };
+    Ok(OneShotCommand::new(
+        binary.to_string_lossy().into_owned(),
+        args,
+        context,
+        IOS_NETWORK_CONTROL_TIMEOUT,
+    ))
+}
+
+fn render_controller_message(output: &std::process::Output, fallback: &str) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !stdout.is_empty() {
+        stdout
+    } else if !stderr.is_empty() {
+        stderr
+    } else {
+        fallback.to_string()
+    }
+}
+
+async fn run_network_controller<I, S>(
+    args: I,
+    context: &'static str,
+    success_fallback: String,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let command = network_controller_command(args, context)?;
+    let output = command.run().await?;
+
+    if output.status.success() {
+        Ok(render_controller_message(&output, &success_fallback))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(command.status_error(&output))
+        } else {
+            Err(stderr)
+        }
+    }
 }
 
 fn parse_simulators(stdout: &[u8]) -> Result<Vec<IosSimulator>, String> {
@@ -189,9 +297,47 @@ pub async fn clear_simulator_location(udid: &str) -> Result<String, String> {
     Ok(format!("Location cleared on {}", udid))
 }
 
+pub async fn set_simulator_network_condition(
+    udid: &str,
+    preset: NetworkConditionPreset,
+) -> Result<String, String> {
+    if !ios_network_throttling_enabled() {
+        return Err(ios_network_throttling_gate_message());
+    }
+    run_network_controller(
+        [
+            "apply".to_string(),
+            "--udid".to_string(),
+            udid.to_string(),
+            "--preset".to_string(),
+            preset.slug().to_string(),
+        ],
+        "configuring iOS Simulator network throttling",
+        format!("Applied {} network condition on {}", preset.label(), udid),
+    )
+    .await
+}
+
+pub async fn clear_simulator_network_condition(udid: &str) -> Result<String, String> {
+    if !ios_network_throttling_enabled() {
+        return Err(ios_network_throttling_gate_message());
+    }
+    run_network_controller(
+        [
+            "clear".to_string(),
+            "--udid".to_string(),
+            udid.to_string(),
+        ],
+        "clearing iOS Simulator network throttling",
+        format!("Cleared network throttling on {}", udid),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_simulators;
+    use super::{bundled_app_dir_for_executable, parse_simulators};
+    use std::path::Path;
 
     #[test]
     fn parses_available_simulators_from_simctl_json() {
@@ -229,5 +375,14 @@ mod tests {
     fn reports_invalid_simctl_json() {
         let err = parse_simulators(b"{not-json").unwrap_err();
         assert!(err.contains("Failed to parse `xcrun simctl list devices --json` output"));
+    }
+
+    #[test]
+    fn resolves_app_bundle_from_executable() {
+        let app_dir = bundled_app_dir_for_executable(Path::new(
+            "/Applications/CatPane.app/Contents/MacOS/catpane",
+        ))
+        .unwrap();
+        assert_eq!(app_dir, Path::new("/Applications/CatPane.app"));
     }
 }

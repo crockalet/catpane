@@ -1,0 +1,85 @@
+name: CatPaneNative
+
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+  projectFormat: xcode16_0
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    CLANG_ENABLE_MODULES: YES
+    SWIFT_VERSION: "5.10"
+
+targets:
+  CatPaneHostApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Controller
+      - path: Support/CatPaneHostApp.entitlements
+        buildPhase: none
+    dependencies:
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Support/CatPaneHostApp.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: CatPane
+        INFOPLIST_KEY_CatPaneRustExecutable: catpane-rust
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        PRODUCT_BUNDLE_IDENTIFIER: "${CATPANE_BUNDLE_ID_BASE}"
+        PRODUCT_NAME: CatPane
+        SKIP_INSTALL: NO
+
+  CatPaneThrottlingController:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Controller
+    dependencies:
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_NAME: CatPaneThrottlingController
+        SKIP_INSTALL: NO
+
+  CatPaneThrottlingExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/Extension
+      - path: Support/CatPaneThrottlingExtension-Info.plist
+        buildPhase: none
+      - path: Support/CatPaneThrottlingExtension.entitlements
+        buildPhase: none
+    dependencies:
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_ENTITLEMENTS: Support/CatPaneThrottlingExtension.entitlements
+        INFOPLIST_FILE: Support/CatPaneThrottlingExtension-Info.plist
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../Frameworks"
+        PRODUCT_BUNDLE_IDENTIFIER: "${CATPANE_BUNDLE_ID_BASE}.throttling-extension"
+        PRODUCT_NAME: CatPaneThrottlingExtension
+        SKIP_INSTALL: NO
+
+schemes:
+  CatPaneNative:
+    build:
+      targets:
+        CatPaneHostApp: all
+        CatPaneThrottlingController: all
+        CatPaneThrottlingExtension: all
+    run:
+      config: Debug
+      executable: CatPaneThrottlingController

@@ -1,5 +1,10 @@
 /target
 /dist
+/.build-tools
+/native/macos/CatPaneNative.xcodeproj
+/native/macos/.derived-data/
+/native/macos/.derived-data-sign/
+DerivedData/
 .env
 
 codedb.snapshot

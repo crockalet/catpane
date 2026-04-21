@@ -2,6 +2,7 @@ use std::{net::UdpSocket, process::Output, time::Duration};
 use tokio::sync::mpsc;
 
 use crate::command::OneShotCommand;
+use crate::network_condition::NetworkConditionPreset;
 
 /// Resolves the `adb` binary path, probing common macOS installation locations
 /// so that GUI apps (Homebrew Cask, double-click launch) find adb even when
@@ -114,6 +115,7 @@ fn deduplicate_devices(devices: Vec<AdbDevice>) -> Vec<AdbDevice> {
 const ADB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const ADB_DEVICE_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const ADB_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const ADB_NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn adb_command<I, S>(args: I, context: &'static str, timeout: Duration) -> OneShotCommand
 where
@@ -791,6 +793,40 @@ pub fn is_emulator(serial: &str) -> bool {
     serial.starts_with("emulator-")
 }
 
+async fn run_emulator_console_command(
+    serial: &str,
+    args: &[&str],
+    context: &'static str,
+) -> Result<(), String> {
+    let command = adb_command(
+        ["-s", serial, "emu"]
+            .into_iter()
+            .chain(args.iter().copied()),
+        context,
+        ADB_NETWORK_TIMEOUT,
+    );
+    let output = command.run().await?;
+    command.ensure_success(output)?;
+    Ok(())
+}
+
+async fn run_android_shell_command(
+    serial: &str,
+    args: &[&str],
+    context: &'static str,
+) -> Result<(), String> {
+    let command = adb_command(
+        ["-s", serial, "shell"]
+            .into_iter()
+            .chain(args.iter().copied()),
+        context,
+        ADB_NETWORK_TIMEOUT,
+    );
+    let output = command.run().await?;
+    command.ensure_success(output)?;
+    Ok(())
+}
+
 /// Set the GPS location on an Android emulator.
 /// Only works on emulator devices (serial starting with "emulator-").
 /// The `adb emu geo fix` command takes longitude first, then latitude.
@@ -826,12 +862,78 @@ pub async fn set_emulator_location(
     Ok(format!("Location set to {}, {} on {}", lat, lon, serial))
 }
 
+pub async fn apply_emulator_network_condition(
+    serial: &str,
+    preset: NetworkConditionPreset,
+) -> Result<String, String> {
+    if !is_emulator(serial) {
+        return Err(format!(
+            "Network throttling via adb is only supported on emulators, not physical device '{}'",
+            serial
+        ));
+    }
+
+    let profile = preset.android_profile();
+    run_emulator_console_command(
+        serial,
+        &["network", "speed", profile.speed],
+        "setting emulator network speed",
+    )
+    .await?;
+    run_emulator_console_command(
+        serial,
+        &["network", "delay", profile.delay],
+        "setting emulator network delay",
+    )
+    .await?;
+
+    if profile.data_enabled {
+        run_emulator_console_command(
+            serial,
+            &["gsm", "data", "on"],
+            "enabling emulator cellular data",
+        )
+        .await?;
+    } else {
+        run_emulator_console_command(
+            serial,
+            &["gsm", "data", "off"],
+            "disabling emulator cellular data",
+        )
+        .await?;
+    }
+
+    if profile.wifi_enabled {
+        run_android_shell_command(serial, &["svc", "wifi", "enable"], "enabling emulator Wi-Fi")
+            .await?;
+    } else {
+        run_android_shell_command(
+            serial,
+            &["svc", "wifi", "disable"],
+            "disabling emulator Wi-Fi",
+        )
+        .await?;
+    }
+
+    Ok(format!(
+        "Applied {} network condition on {}",
+        preset.label(),
+        serial
+    ))
+}
+
+pub async fn clear_emulator_network_condition(serial: &str) -> Result<String, String> {
+    apply_emulator_network_condition(serial, NetworkConditionPreset::Unthrottled).await?;
+    Ok(format!("Cleared network throttling on {}", serial))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         extract_ip_from_route_output, parse_adb_devices_output, parse_pidof_output,
         parse_running_packages_output, service_matches_expected_name,
     };
+    use crate::network_condition::NetworkConditionPreset;
 
     #[test]
     fn parses_and_deduplicates_adb_devices() {
@@ -880,5 +982,18 @@ adb-123._adb-tls-connect._tcp device product:oriole model:Pixel_6 device:oriole 
             "Pixel_8._adb-tls-pairing._tcp.local.",
             "ADB_WIFI_abcde"
         ));
+    }
+
+    #[test]
+    fn detects_android_emulators_by_serial() {
+        assert!(super::is_emulator("emulator-5554"));
+        assert!(!super::is_emulator("R58M12345AB"));
+    }
+
+    #[test]
+    fn offline_profile_disables_transport_flags() {
+        let profile = NetworkConditionPreset::Offline.android_profile();
+        assert!(!profile.data_enabled);
+        assert!(!profile.wifi_enabled);
     }
 }

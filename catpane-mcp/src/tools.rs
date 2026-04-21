@@ -12,6 +12,7 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use catpane_core::{
     capture::{self, CaptureScope, ConnectedDevice, DevicePlatform},
+    ios_network_throttling_enabled, ios_network_throttling_gate_message,
     log_buffer_config::log_buffer_capacity,
     log_entry::LogLevel,
 };
@@ -42,6 +43,8 @@ pub const TOOL_GET_WATCH_MATCHES: &str = "get_watch_matches";
 pub const TOOL_DELETE_WATCH: &str = "delete_watch";
 pub const TOOL_SET_LOCATION: &str = "set_location";
 pub const TOOL_CLEAR_LOCATION: &str = "clear_location";
+pub const TOOL_SET_NETWORK_CONDITION: &str = "set_network_condition";
+pub const TOOL_CLEAR_NETWORK_CONDITION: &str = "clear_network_condition";
 pub const TOOL_GET_CRASHES: &str = "get_crashes";
 
 pub const DEFAULT_GET_LOGS_LIMIT: usize = 100;
@@ -336,6 +339,33 @@ pub struct ClearLocationArgs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClearLocationResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetNetworkConditionArgs {
+    #[serde(default)]
+    pub device: Option<String>,
+    pub preset: catpane_core::NetworkConditionPreset,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNetworkConditionResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearNetworkConditionArgs {
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearNetworkConditionResponse {
     pub message: String,
 }
 
@@ -822,6 +852,8 @@ pub fn tool_definitions() -> Vec<Tool> {
         restart_adb_tool(),
         set_location_tool(),
         clear_location_tool(),
+        set_network_condition_tool(),
+        clear_network_condition_tool(),
         get_crashes_tool(),
         create_watch_tool(),
         list_watches_tool(),
@@ -1279,6 +1311,14 @@ impl McpRuntimeState {
             TOOL_CLEAR_LOCATION => {
                 let args = parse_arguments::<ClearLocationArgs>(&params)?;
                 json_success(&handle_clear_location(args).await?)
+            }
+            TOOL_SET_NETWORK_CONDITION => {
+                let args = parse_arguments::<SetNetworkConditionArgs>(&params)?;
+                json_success(&handle_set_network_condition(args).await?)
+            }
+            TOOL_CLEAR_NETWORK_CONDITION => {
+                let args = parse_arguments::<ClearNetworkConditionArgs>(&params)?;
+                json_success(&handle_clear_network_condition(args).await?)
             }
             TOOL_GET_CRASHES => {
                 let args = parse_arguments::<GetCrashesArgs>(&params)?;
@@ -2042,6 +2082,38 @@ fn clear_location_tool() -> Tool {
     )
 }
 
+fn set_network_condition_tool() -> Tool {
+    Tool::new(
+        TOOL_SET_NETWORK_CONDITION,
+        object_schema(
+            vec![
+                ("device", string_property("Connected device identifier. If omitted and exactly one device is available, that device is used.")),
+                (
+                    "preset",
+                    json!({
+                        "type": "string",
+                        "enum": ["unthrottled", "edge", "3g", "offline"],
+                        "description": "Named network condition preset to apply."
+                    }),
+                ),
+            ],
+            &["preset"],
+        ),
+    )
+    .with_description("Apply a named network throttling preset to an Android emulator. iOS simulator support is feature-flagged off by default until signed extension builds are available. Physical devices are not supported.")
+}
+
+fn clear_network_condition_tool() -> Tool {
+    Tool::new(
+        TOOL_CLEAR_NETWORK_CONDITION,
+        object_schema(
+            vec![("device", string_property("Connected device identifier."))],
+            &[],
+        ),
+    )
+    .with_description("Clear any applied network throttling and restore normal connectivity on a supported emulator. iOS simulator support is feature-flagged off by default until signed extension builds are available.")
+}
+
 fn get_crashes_tool() -> Tool {
     Tool::new(
         TOOL_GET_CRASHES,
@@ -2268,6 +2340,77 @@ async fn handle_clear_location(
             "Clearing spoofed location is only supported on iOS simulators. For Android emulators, set a new location or restart the emulator.",
         )),
     }
+}
+
+async fn handle_set_network_condition(
+    args: SetNetworkConditionArgs,
+) -> Result<SetNetworkConditionResponse, McpToolError> {
+    let device = resolve_connected_device(args.device).await?;
+    let message = match device.platform {
+        DevicePlatform::IosSimulator => {
+            if !ios_network_throttling_enabled() {
+                return Err(McpToolError::invalid_params(
+                    ios_network_throttling_gate_message(),
+                ));
+            }
+            catpane_core::ios::set_simulator_network_condition(&device.id, args.preset)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+        DevicePlatform::IosDevice => {
+            return Err(McpToolError::invalid_params(format!(
+                "Network throttling is only supported on iOS simulators, not physical device '{}'.",
+                device.id
+            )));
+        }
+        DevicePlatform::Android => {
+            if !catpane_core::adb::is_emulator(&device.id) {
+                return Err(McpToolError::invalid_params(format!(
+                    "Network throttling is only supported on Android emulators, not physical device '{}'.",
+                    device.id
+                )));
+            }
+            catpane_core::adb::apply_emulator_network_condition(&device.id, args.preset)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+    };
+    Ok(SetNetworkConditionResponse { message })
+}
+
+async fn handle_clear_network_condition(
+    args: ClearNetworkConditionArgs,
+) -> Result<ClearNetworkConditionResponse, McpToolError> {
+    let device = resolve_connected_device(args.device).await?;
+    let message = match device.platform {
+        DevicePlatform::IosSimulator => {
+            if !ios_network_throttling_enabled() {
+                return Err(McpToolError::invalid_params(
+                    ios_network_throttling_gate_message(),
+                ));
+            }
+            catpane_core::ios::clear_simulator_network_condition(&device.id)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+        DevicePlatform::IosDevice => {
+            return Err(McpToolError::invalid_params(
+                "Clearing network throttling is only supported on iOS simulators.",
+            ));
+        }
+        DevicePlatform::Android => {
+            if !catpane_core::adb::is_emulator(&device.id) {
+                return Err(McpToolError::invalid_params(format!(
+                    "Clearing network throttling is only supported on Android emulators, not physical device '{}'.",
+                    device.id
+                )));
+            }
+            catpane_core::adb::clear_emulator_network_condition(&device.id)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+    };
+    Ok(ClearNetworkConditionResponse { message })
 }
 
 fn empty_object_schema() -> JsonSchema {

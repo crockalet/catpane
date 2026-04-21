@@ -188,6 +188,29 @@ impl eframe::App for CatPaneApp {
                 }
             }
 
+            let network_result = if let Some((_, rx)) = &mut self.app.network_pending {
+                match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        Some(Err("Network task ended unexpectedly".to_string()))
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(result) = network_result {
+                let device_id = self.app.network_pending.take().map(|(id, _)| id);
+                if let Some(device_id) = device_id {
+                    let state = self.app.device_networks.entry(device_id).or_default();
+                    match result {
+                        Ok(message) => state.status = Some((true, message)),
+                        Err(message) => state.status = Some((false, message)),
+                    }
+                }
+            }
+
             let mut tracker_devices: Option<Vec<ConnectedDevice>> = None;
             if let Some(tracker) = &mut self.app.device_tracker {
                 while let Ok(devices) = tracker.try_recv() {

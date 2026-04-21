@@ -64,6 +64,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+      APPLE_EXTENSION_PROVISIONING_PROFILE: ${{ secrets.APPLE_EXTENSION_PROVISIONING_PROFILE }}
+      APPLE_HOST_PROVISIONING_PROFILE: ${{ secrets.APPLE_HOST_PROVISIONING_PROFILE }}
       APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
       APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
       APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
@@ -106,10 +108,22 @@ jobs:
           printf '%s' "$APPLE_NOTARY_API_KEY_P8" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
           echo "APPLE_NOTARY_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Write provisioning profiles
+        if: ${{ env.APPLE_HOST_PROVISIONING_PROFILE != '' && env.APPLE_EXTENSION_PROVISIONING_PROFILE != '' }}
+        run: |
+          set -euo pipefail
+          host_profile="$RUNNER_TEMP/catpane-host.provisionprofile"
+          extension_profile="$RUNNER_TEMP/catpane-extension.provisionprofile"
+          printf '%s' "$APPLE_HOST_PROVISIONING_PROFILE" | base64 --decode > "$host_profile"
+          printf '%s' "$APPLE_EXTENSION_PROVISIONING_PROFILE" | base64 --decode > "$extension_profile"
+          echo "APPLE_HOST_PROVISIONING_PROFILE_PATH=$host_profile" >> "$GITHUB_ENV"
+          echo "APPLE_EXTENSION_PROVISIONING_PROFILE_PATH=$extension_profile" >> "$GITHUB_ENV"
       - name: Package macOS app bundle
         env:
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
           TARGET_TRIPLE: ${{ matrix.target }}
+          EXTENSION_PROVISIONING_PROFILE_PATH: ${{ env.APPLE_EXTENSION_PROVISIONING_PROFILE_PATH }}
+          HOST_PROVISIONING_PROFILE_PATH: ${{ env.APPLE_HOST_PROVISIONING_PROFILE_PATH }}
           CODESIGN_IDENTITY: ${{ env.APPLE_CODESIGN_IDENTITY }}
         run: scripts/package-macos-app.sh
       - name: Upload workflow artifacts

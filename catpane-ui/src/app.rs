@@ -1,6 +1,7 @@
 use crate::pane::{Pane, PaneId, PaneNode, SplitDir, default_word_wrap};
 use catpane_core::capture::{self, CaptureController, ConnectedDevice};
 use catpane_core::log_entry::{LogEntry, LogLevel};
+use catpane_core::NetworkConditionPreset;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -14,6 +15,7 @@ pub enum SidebarTab {
     #[default]
     Devices,
     Location,
+    Network,
     Crashes,
     Watches,
 }
@@ -31,6 +33,20 @@ impl Default for DeviceLocationState {
             lat: String::new(),
             lon: String::new(),
             preset: "Custom".to_string(),
+            status: None,
+        }
+    }
+}
+
+pub struct DeviceNetworkState {
+    pub preset: NetworkConditionPreset,
+    pub status: Option<(bool, String)>,
+}
+
+impl Default for DeviceNetworkState {
+    fn default() -> Self {
+        Self {
+            preset: NetworkConditionPreset::Unthrottled,
             status: None,
         }
     }
@@ -142,6 +158,8 @@ pub struct App {
     pub device_locations: HashMap<String, DeviceLocationState>,
     pub saved_locations: Vec<SavedLocation>,
     pub location_pending: Option<(String, tokio::sync::mpsc::Receiver<Result<String, String>>)>,
+    pub device_networks: HashMap<String, DeviceNetworkState>,
+    pub network_pending: Option<(String, tokio::sync::mpsc::Receiver<Result<String, String>>)>,
     // Save location input
     pub save_location_name: String,
     // Expanded crash indices in sidebar (for collapsible detail view)
@@ -191,6 +209,8 @@ impl App {
             device_locations: HashMap::new(),
             saved_locations: Self::load_saved_locations(),
             location_pending: None,
+            device_networks: HashMap::new(),
+            network_pending: None,
             save_location_name: String::new(),
             expanded_crashes: std::collections::HashSet::new(),
         };
@@ -245,6 +265,7 @@ impl App {
             || self.ios_simulator_boot_rx.is_some()
             || self.ios_simulator_booting_udid.is_some()
             || self.location_pending.is_some()
+            || self.network_pending.is_some()
         {
             return true;
         }
@@ -699,6 +720,8 @@ impl App {
             device_locations: HashMap::new(),
             saved_locations: Self::load_saved_locations(),
             location_pending: None,
+            device_networks: HashMap::new(),
+            network_pending: None,
             save_location_name: String::new(),
             expanded_crashes: std::collections::HashSet::new(),
         };

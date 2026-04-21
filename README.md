@@ -10,6 +10,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 - **Multi-window** — open additional windows with ⌘N / Ctrl+N
 - **Android + iOS targets** — capture from connected Android devices, booted iOS simulators, and wired physical iOS devices on macOS
 - **Boot iOS simulators** — launch an available iOS simulator directly from CatPane on macOS
+- **Network throttling presets** — apply `unthrottled`, `edge`, `3g`, or `offline` to Android emulators; iOS simulator support remains feature-flagged off by default until CatPane ships a signed Network Extension build
 - **Tag filters** — Android Studio-style syntax with include, exclude, regex, and per-tag levels:
   - `tag:Name` — include only this tag
   - `tag-:Exclude` — hide this tag
@@ -36,6 +37,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 - For Android capture: [ADB](https://developer.android.com/tools/adb) (Android Debug Bridge) in your PATH
 - For iOS simulator capture on macOS: Xcode / CoreSimulator tooling available via `xcrun`
 - For physical iOS capture on macOS: `idevicesyslog` from `libimobiledevice` in your PATH
+- For iOS simulator throttling on macOS: macOS 15+, plus a CatPane build signed for Network Extension use so the bundled helper and app-proxy extension can be installed by the OS. Release packaging needs matching host + extension provisioning profiles. The iOS path is hidden by default until signed builds are available; set `CATPANE_ENABLE_IOS_NETWORK_THROTTLING=1` to re-enable it locally.
 
 ## Install with Homebrew
 
@@ -104,6 +106,8 @@ Available MCP tools:
 - `start_capture`
 - `stop_capture`
 - `get_status`
+- `set_network_condition`
+- `clear_network_condition`
 - `get_crashes`
 - `create_watch`
 - `list_watches`
@@ -124,6 +128,8 @@ Example MCP client config using stdio transport:
 ```
 
 Use `start_capture` to begin buffering logs for a device or iOS capture target, then query them with `get_logs`. For iOS captures, prefer `process`, `text`, and simulator `predicate` scope so irrelevant logs do not churn the main buffer. `clear_logs` resets the current observation window, `get_status` shows active captures plus scope/buffer warnings, `get_crashes` surfaces structured crash reports, and `create_watch` + `get_watch_matches` let agents pin high-signal lines so they survive main-buffer overflow. `get_logs` also supports iOS-specific `process`, `subsystem`, and `category` filters, though physical-device logs may not populate every field.
+
+`set_network_condition` applies one of the named presets (`unthrottled`, `edge`, `3g`, `offline`) to a supported target. Android support is limited to emulators. iOS support is limited to simulators, currently targets the Simulator host app as a whole, depends on a properly signed macOS build with matching host + extension provisioning profiles, and is feature-flagged off by default until those signed builds are available.
 
 ### Agent skill via `vercel-labs/skills`
 
@@ -172,6 +178,8 @@ Session and tag history are saved to:
 Set `CATPANE_LOG_BUFFER_CAPACITY` to override the default in-memory per-pane log retention (`50_000`).
 
 Set `CATPANE_INITIAL_LOG_BACKLOG` to override how many recent Android logcat lines CatPane loads before switching to live streaming. The default is `2_000`, and it is capped at the in-memory buffer capacity.
+
+Set `CATPANE_ENABLE_IOS_NETWORK_THROTTLING=1` to re-enable the iOS Simulator network-throttling path for local signed-build testing. Android emulator throttling is unaffected.
 
 ## License
 
