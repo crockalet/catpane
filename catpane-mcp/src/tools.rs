@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -52,8 +52,12 @@ pub const MAX_GET_LOGS_LIMIT: usize = 1_000;
 pub const DEFAULT_GET_CRASHES_LIMIT: usize = 10;
 
 const CAPTURE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const IDLE_CAPTURE_REAPER_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_IOS_DEVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const IOS_DEVICE_IDLE_TIMEOUT_ENV: &str = "CATPANE_IOS_DEVICE_IDLE_TIMEOUT_SECS";
 const STOP_CAPTURE_REASON: &str = "stopped by stop_capture";
 const RESTART_CAPTURE_REASON: &str = "stopped for restart";
+const IDLE_TIMEOUT_REASON_PREFIX: &str = "stopped after idle timeout";
 const HOT_BUFFER_UTILIZATION_PCT: usize = 90;
 
 #[derive(Debug, Clone, Serialize)]
@@ -701,6 +705,9 @@ pub struct CaptureStatus {
     pub pid_filter: Option<u32>,
     pub running: bool,
     pub started_at_ms: u64,
+    pub last_activity_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1047,6 +1054,16 @@ impl McpRuntimeState {
                 Some(resolve_capture_id(&inner.captures, &selector)?)
             };
 
+            if let Some(selected_capture_id) = selected_capture_id.as_deref() {
+                if let Some(capture) = inner.captures.get(selected_capture_id) {
+                    capture.note_activity();
+                }
+            } else {
+                for capture in inner.captures.values() {
+                    capture.note_activity();
+                }
+            }
+
             let mut captures = inner
                 .captures
                 .values()
@@ -1093,6 +1110,7 @@ impl McpRuntimeState {
             })?;
             Arc::clone(&capture.shared)
         };
+        shared.note_activity();
 
         let name = args.name.trim().to_owned();
         if name.is_empty() {
@@ -1158,6 +1176,7 @@ impl McpRuntimeState {
             })?;
             Arc::clone(&capture.shared)
         };
+        shared.note_activity();
 
         let watches = lock_recover(&shared.watches);
         let summaries = watches.list();
@@ -1181,6 +1200,7 @@ impl McpRuntimeState {
             })?;
             Arc::clone(&capture.shared)
         };
+        shared.note_activity();
 
         let limit = args.limit.unwrap_or(DEFAULT_GET_LOGS_LIMIT);
         if limit > MAX_GET_LOGS_LIMIT {
@@ -1225,6 +1245,7 @@ impl McpRuntimeState {
             })?;
             Arc::clone(&capture.shared)
         };
+        shared.note_activity();
 
         let mut watches = lock_recover(&shared.watches);
         let deleted = watches.remove(&args.watch_id);
@@ -1247,6 +1268,29 @@ impl McpRuntimeState {
                 wait_for_completion(shutdown.pump_done.clone()).await;
             })
             .await;
+        }
+    }
+
+    pub async fn reap_idle_captures(&self) {
+        let shutdowns = {
+            let mut inner = lock_recover(&self.inner);
+            inner.prepare_idle_shutdowns(now_epoch_ms())
+        };
+        let mut stopped_capture_ids = Vec::with_capacity(shutdowns.len());
+        for shutdown in shutdowns {
+            let capture_id = shutdown.capture_id.clone();
+            if shutdown.wait_for_idle_stop().await.is_ok() {
+                stopped_capture_ids.push(capture_id);
+            }
+        }
+
+        if stopped_capture_ids.is_empty() {
+            return;
+        }
+
+        let mut inner = lock_recover(&self.inner);
+        for capture_id in stopped_capture_ids {
+            inner.finalize_capture_shutdown(&capture_id);
         }
     }
 
@@ -1442,6 +1486,13 @@ impl RuntimeInner {
     fn finalize_capture_shutdown(&mut self, capture_id: &str) -> Option<CaptureRuntime> {
         self.captures.remove(capture_id)
     }
+
+    fn prepare_idle_shutdowns(&mut self, now_ms: u64) -> Vec<CaptureShutdownWait> {
+        self.captures
+            .values_mut()
+            .filter_map(|capture| capture.request_idle_shutdown_if_expired(now_ms))
+            .collect()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1475,6 +1526,17 @@ impl CaptureShutdownWait {
             CAPTURE_SHUTDOWN_TIMEOUT,
             format!(
                 "waiting for capture `{}` on device `{}` to stop",
+                self.capture_id, self.device
+            ),
+        )
+        .await
+    }
+
+    async fn wait_for_idle_stop(&self) -> Result<(), McpToolError> {
+        self.wait_with_timeout(
+            CAPTURE_SHUTDOWN_TIMEOUT,
+            format!(
+                "waiting for idle capture `{}` on device `{}` to stop",
                 self.capture_id, self.device
             ),
         )
@@ -1534,6 +1596,28 @@ impl CaptureRuntime {
         !self.pump_task.is_finished()
     }
 
+    fn note_activity(&self) {
+        self.shared.note_activity();
+    }
+
+    fn idle_timeout(&self) -> Option<Duration> {
+        idle_timeout_for_platform(self.shared.platform)
+    }
+
+    fn request_idle_shutdown_if_expired(&mut self, now_ms: u64) -> Option<CaptureShutdownWait> {
+        if self.shutdown_requested || !self.is_running() {
+            return None;
+        }
+
+        let timeout = self.idle_timeout()?;
+        let last_activity_at_ms = self.shared.last_activity_at_ms();
+        if now_ms.saturating_sub(last_activity_at_ms) < duration_as_millis(timeout) {
+            return None;
+        }
+
+        Some(self.request_shutdown(&idle_timeout_reason(timeout)))
+    }
+
     fn snapshot(&self) -> CaptureStatus {
         self.shared.snapshot(&self.capture_id, self.is_running())
     }
@@ -1547,6 +1631,7 @@ impl Drop for CaptureRuntime {
 
 impl CaptureRuntime {
     fn clear_logs(&self) -> ClearLogsResponse {
+        self.note_activity();
         let (cleared_entries, cleared_retained_matches) = self.shared.clear_logs();
         ClearLogsResponse {
             cleared_entries,
@@ -1556,6 +1641,7 @@ impl CaptureRuntime {
     }
 
     fn query_logs(&self, args: GetLogsArgs) -> Result<GetLogsResponse, McpToolError> {
+        self.note_activity();
         let query = args.into_query()?;
         let LogPage { entries, meta } = self.shared.query(&query);
         let mut capture = self.snapshot();
@@ -1569,6 +1655,7 @@ impl CaptureRuntime {
     }
 
     fn get_crashes(&self, args: GetCrashesArgs) -> Result<GetCrashesResponse, McpToolError> {
+        self.note_activity();
         let crash_type_filter = normalize_optional_string(args.crash_type)
             .as_deref()
             .map(parse_crash_type)
@@ -1638,13 +1725,26 @@ impl CaptureRuntime {
     }
 }
 
-#[derive(Default)]
 struct CaptureStats {
     ingested_lines: u64,
     parsed_entries: u64,
     parse_errors: u64,
+    last_activity_at_ms: u64,
     finished_at_ms: Option<u64>,
     stop_reason: Option<String>,
+}
+
+impl CaptureStats {
+    fn new(started_at_ms: u64) -> Self {
+        Self {
+            ingested_lines: 0,
+            parsed_entries: 0,
+            parse_errors: 0,
+            last_activity_at_ms: started_at_ms,
+            finished_at_ms: None,
+            stop_reason: None,
+        }
+    }
 }
 
 struct CaptureShared {
@@ -1671,6 +1771,7 @@ impl CaptureShared {
         scope: CaptureScope,
         capacity: usize,
     ) -> Self {
+        let started_at_ms = now_epoch_ms();
         Self {
             device,
             device_name,
@@ -1678,12 +1779,22 @@ impl CaptureShared {
             package,
             pid_filter,
             scope,
-            started_at_ms: now_epoch_ms(),
+            started_at_ms,
             buffer: Mutex::new(LogBuffer::new(capacity)),
-            stats: Mutex::new(CaptureStats::default()),
+            stats: Mutex::new(CaptureStats::new(started_at_ms)),
             watches: Mutex::new(crate::watch::WatchSet::new()),
             watch_retention_capacity: watch_retention_capacity(capacity),
         }
+    }
+
+    fn note_activity(&self) {
+        let mut stats = lock_recover(&self.stats);
+        stats.last_activity_at_ms = now_epoch_ms();
+    }
+
+    fn last_activity_at_ms(&self) -> u64 {
+        let stats = lock_recover(&self.stats);
+        stats.last_activity_at_ms
     }
 
     fn append_entry(&self, entry: catpane_core::log_entry::LogEntry) {
@@ -1754,7 +1865,17 @@ impl CaptureShared {
             WatchRetentionStatus::from(watches.retention_stats())
         };
         let stats = lock_recover(&self.stats);
-        let warnings = capture_warnings(self.platform, &self.scope, &buffer, &retained_matches);
+        let last_activity_at_ms = stats.last_activity_at_ms;
+        let idle_timeout = idle_timeout_for_platform(self.platform);
+        let warnings = capture_warnings(
+            self.platform,
+            &self.scope,
+            &buffer,
+            &retained_matches,
+            running,
+            idle_timeout,
+            last_activity_at_ms,
+        );
 
         CaptureStatus {
             capture_id: capture_id.to_owned(),
@@ -1765,6 +1886,8 @@ impl CaptureShared {
             pid_filter: self.pid_filter,
             running,
             started_at_ms: self.started_at_ms,
+            last_activity_at_ms,
+            idle_timeout_ms: idle_timeout.map(duration_as_millis),
             finished_at_ms: stats.finished_at_ms,
             stop_reason: stats.stop_reason.clone(),
             ingested_lines: stats.ingested_lines,
@@ -1928,7 +2051,7 @@ fn start_capture_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Start a new Android or iOS capture. For iOS, prefer process/text/predicate scope up front so irrelevant logs never evict the useful ones.")
+    .with_description("Start a new Android or iOS capture. For iOS, prefer process/text/predicate scope up front so irrelevant logs never evict the useful ones. Physical iOS captures auto-stop after MCP inactivity (15m by default).")
 }
 
 fn stop_capture_tool() -> Tool {
@@ -2644,11 +2767,45 @@ fn watch_retention_capacity(main_capacity: usize) -> usize {
     (main_capacity / 10).clamp(256, 5_000)
 }
 
+fn ios_device_idle_timeout() -> Option<Duration> {
+    static TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| match std::env::var(IOS_DEVICE_IDLE_TIMEOUT_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(seconds) => Some(Duration::from_secs(seconds)),
+            Err(_) => Some(DEFAULT_IOS_DEVICE_IDLE_TIMEOUT),
+        },
+        Err(_) => Some(DEFAULT_IOS_DEVICE_IDLE_TIMEOUT),
+    })
+}
+
+fn idle_timeout_for_platform(platform: DevicePlatform) -> Option<Duration> {
+    match platform {
+        DevicePlatform::IosDevice => ios_device_idle_timeout(),
+        DevicePlatform::Android | DevicePlatform::IosSimulator => None,
+    }
+}
+
+fn duration_as_millis(duration: Duration) -> u64 {
+    duration
+        .as_millis()
+        .min(u128::from(u64::MAX))
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn idle_timeout_reason(timeout: Duration) -> String {
+    format!("{IDLE_TIMEOUT_REASON_PREFIX} ({})", format_duration(timeout))
+}
+
 fn capture_warnings(
     platform: DevicePlatform,
     scope: &CaptureScope,
     buffer: &LogBufferStatus,
     retained_matches: &WatchRetentionStatus,
+    running: bool,
+    idle_timeout: Option<Duration>,
+    last_activity_at_ms: u64,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     let utilization_pct = if buffer.capacity == 0 {
@@ -2677,6 +2834,19 @@ fn capture_warnings(
         warnings.push(
             "Unscoped iOS capture is near capacity. Add process/text/predicate scope or create a watch before the next reproduction.".to_string(),
         );
+    }
+
+    if running && matches!(platform, DevicePlatform::IosDevice) && let Some(timeout) = idle_timeout {
+        let idle_ms = now_epoch_ms().saturating_sub(last_activity_at_ms);
+        let timeout_ms = duration_as_millis(timeout);
+        if idle_ms >= timeout_ms.saturating_mul(3) / 4 {
+            let remaining_ms = timeout_ms.saturating_sub(idle_ms);
+            warnings.push(format!(
+                "Physical iOS capture auto-stops after {} without MCP activity. Poll get_logs/get_status/get_watch_matches to keep it alive (about {} remaining).",
+                format_duration(timeout),
+                format_duration(Duration::from_millis(remaining_ms)),
+            ));
+        }
     }
 
     if ios_capture && retained_matches.watch_count == 0 && buffer.dropped > 0 {
@@ -2960,6 +3130,45 @@ mod tests {
         assert!(err.message.contains("before restart"));
     }
 
+    #[tokio::test]
+    async fn prepare_idle_shutdown_requests_shutdown_for_stale_ios_device_capture() {
+        let device = ios_device("ios-42", DevicePlatform::IosDevice);
+        let (capture_control, mut kill_rx, completion_tx) =
+            capture::CaptureController::test_controller();
+        let mut inner = RuntimeInner::default();
+        inner.captures.insert(
+            "capture-ios".to_owned(),
+            capture_runtime_with_control("capture-ios", &device, capture_control),
+        );
+        {
+            let capture = inner.captures.get("capture-ios").unwrap();
+            let mut stats = lock_recover(&capture.shared.stats);
+            stats.last_activity_at_ms = 0;
+        }
+
+        let shutdowns =
+            inner.prepare_idle_shutdowns(duration_as_millis(DEFAULT_IOS_DEVICE_IDLE_TIMEOUT) + 1);
+        assert_eq!(shutdowns.len(), 1);
+        assert_eq!(kill_rx.recv().await, Some(()));
+
+        let snapshot = inner.captures["capture-ios"].snapshot();
+        assert_eq!(
+            snapshot.stop_reason,
+            Some(idle_timeout_reason(DEFAULT_IOS_DEVICE_IDLE_TIMEOUT))
+        );
+
+        let _ = completion_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn android_capture_has_no_idle_timeout() {
+        let device = connected_device("android-idle");
+        let capture = capture_runtime("capture-android", &device);
+
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.idle_timeout_ms, None);
+    }
+
     #[test]
     fn resolve_capture_scope_rejects_android_ios_only_fields() {
         let device = connected_device("android-1");
@@ -3005,6 +3214,9 @@ mod tests {
                 retained_capacity: 0,
                 retained_dropped: 0,
             },
+            true,
+            Some(DEFAULT_IOS_DEVICE_IDLE_TIMEOUT),
+            now_epoch_ms(),
         );
 
         assert!(warnings.iter().any(|warning| warning.contains("unscoped iOS capture")));

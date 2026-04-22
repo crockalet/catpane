@@ -3,6 +3,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{
     self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
 };
+use tokio::{task::JoinHandle, time::MissedTickBehavior};
 
 use crate::protocol::{
     CallToolParams, EmptyParams, EmptyResult, INTERNAL_ERROR, ImplementationInfo, InitializeParams,
@@ -11,7 +12,9 @@ use crate::protocol::{
     METHOD_TOOLS_CALL, METHOD_TOOLS_LIST, NOTIFICATION_INITIALIZED, RequestId, ServerCapabilities,
     Tool,
 };
-use crate::tools::{McpRuntimeState, handle_tool_call, tool_definitions};
+use crate::tools::{
+    IDLE_CAPTURE_REAPER_INTERVAL, McpRuntimeState, handle_tool_call, tool_definitions,
+};
 
 const MCP_WORKFLOW_INSTRUCTIONS: &str = "For iOS debugging, avoid broad unscoped captures when possible. Start with get_status, then prefer start_capture with explicit device plus process/text/predicate scope, call clear_logs before a fresh reproduction, and create_watch for the app process or error text so relevant lines survive main-buffer overflow. Use get_watch_matches for high-signal polling, get_crashes for structured crash checks, and small filtered get_logs calls for broader context.";
 
@@ -24,6 +27,7 @@ pub async fn run_stdio_server(rt: tokio::runtime::Handle) -> Result<(), String> 
 struct StdioMcpServer {
     rt: tokio::runtime::Handle,
     state: McpRuntimeState,
+    idle_reaper: JoinHandle<()>,
     server_info: ImplementationInfo,
     tools: Vec<Tool>,
     initialize_seen: bool,
@@ -36,9 +40,20 @@ enum InboundMessage {
 
 impl StdioMcpServer {
     fn new(rt: tokio::runtime::Handle) -> Self {
+        let state = McpRuntimeState::new();
+        let reaper_state = state.clone();
+        let idle_reaper = rt.spawn(async move {
+            let mut interval = tokio::time::interval(IDLE_CAPTURE_REAPER_INTERVAL);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                reaper_state.reap_idle_captures().await;
+            }
+        });
         Self {
             rt,
-            state: McpRuntimeState::new(),
+            state,
+            idle_reaper,
             server_info: server_info(),
             tools: tool_definitions(),
             initialize_seen: false,
@@ -66,6 +81,7 @@ impl StdioMcpServer {
             }
         }
 
+        self.idle_reaper.abort();
         self.state.shutdown_all_captures().await;
 
         writer
