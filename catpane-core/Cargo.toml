@@ -8,6 +8,7 @@ default = []
 egui = ["dep:egui", "dep:qrcode"]
 
 [dependencies]
+async-trait = "0.1"
 egui = { version = "0.31", optional = true }
 mdns-sd = "0.12"
 qrcode = { version = "0.14", optional = true }

@@ -8,6 +8,7 @@ pub mod ios_device;
 pub mod log_buffer_config;
 pub mod log_entry;
 pub mod network_condition;
+pub mod throttle_android;
 
 pub use capture::{CaptureController, CaptureHandle, CaptureScope, ConnectedDevice, DevicePlatform};
 pub use crash_detector::{CrashDetector, CrashReport, CrashType, detect_crashes};
@@ -23,6 +24,7 @@ pub use log_entry::{
     parse_logcat_line,
 };
 pub use network_condition::{
-    AndroidEmulatorNetworkProfile, IOS_NETWORK_THROTTLING_ENV, NetworkConditionPreset,
-    ios_network_throttling_enabled, ios_network_throttling_gate_message,
+    AndroidEmulatorNetworkProfile, CustomNetworkParams, IOS_NETWORK_THROTTLING_ENV,
+    NetworkConditionPreset, NetworkConditionSpec, ios_network_throttling_enabled,
+    ios_network_throttling_gate_message,
 };

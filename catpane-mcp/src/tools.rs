@@ -351,7 +351,31 @@ pub struct ClearLocationResponse {
 pub struct SetNetworkConditionArgs {
     #[serde(default)]
     pub device: Option<String>,
-    pub preset: catpane_core::NetworkConditionPreset,
+    #[serde(default)]
+    pub preset: Option<catpane_core::NetworkConditionPreset>,
+    #[serde(default)]
+    pub custom: Option<catpane_core::CustomNetworkParams>,
+}
+
+impl SetNetworkConditionArgs {
+    /// Resolves `preset` / `custom` into a single [`NetworkConditionSpec`],
+    /// rejecting requests that supply both or neither.
+    pub fn resolve_spec(&self) -> Result<catpane_core::NetworkConditionSpec, String> {
+        match (self.preset, self.custom) {
+            (Some(_), Some(_)) => Err(
+                "Provide either 'preset' or 'custom', not both.".to_string(),
+            ),
+            (None, None) => Err(
+                "One of 'preset' or 'custom' is required.".to_string(),
+            ),
+            (Some(p), None) => Ok(catpane_core::NetworkConditionSpec::preset(p)),
+            (None, Some(c)) => {
+                let spec = catpane_core::NetworkConditionSpec::custom(c);
+                spec.validate()?;
+                Ok(spec)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2216,14 +2240,31 @@ fn set_network_condition_tool() -> Tool {
                     json!({
                         "type": "string",
                         "enum": ["unthrottled", "edge", "3g", "offline"],
-                        "description": "Named network condition preset to apply."
+                        "description": "Named network condition preset to apply. Mutually exclusive with 'custom'."
+                    }),
+                ),
+                (
+                    "custom",
+                    json!({
+                        "type": "object",
+                        "description": "Custom network shaping (physical Android only — applied via the CatPane helper app). Mutually exclusive with 'preset'.",
+                        "properties": {
+                            "delay_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "One-way delay added to packets, in milliseconds."},
+                            "jitter_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "Maximum random jitter added/subtracted from delay, in milliseconds."},
+                            "loss_pct": {"type": "number", "minimum": 0, "maximum": 100, "description": "Random packet loss probability, 0–100%."},
+                            "downlink_kbps": {"type": "integer", "minimum": 0, "maximum": 10000000, "description": "Downlink (device-bound) bandwidth cap in kbps."},
+                            "uplink_kbps": {"type": "integer", "minimum": 0, "maximum": 10000000, "description": "Uplink (device-originated) bandwidth cap in kbps."}
+                        },
+                        "additionalProperties": false
                     }),
                 ),
             ],
-            &["preset"],
+            &[],
         ),
     )
-    .with_description("Apply a named network throttling preset to an Android emulator. iOS simulator support is feature-flagged off by default until signed extension builds are available. Physical devices are not supported.")
+    .with_description(
+        "Apply a network throttling profile to the focused device. Provide exactly one of `preset` (unthrottled / edge / 3g / offline) or `custom` (delay_ms, jitter_ms, loss_pct, downlink_kbps, uplink_kbps). Android emulators support presets via the emulator console; physical Android devices require the CatPane helper app (auto-installed when available) and support both presets and custom shaping. iOS Simulator support is feature-flagged off by default.",
+    )
 }
 
 fn clear_network_condition_tool() -> Tool {
@@ -2234,7 +2275,7 @@ fn clear_network_condition_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Clear any applied network throttling and restore normal connectivity on a supported emulator. iOS simulator support is feature-flagged off by default until signed extension builds are available.")
+    .with_description("Clear any applied network throttling on the focused device. Works on Android emulators, physical Android devices (via the CatPane helper app), and the iOS Simulator (when the iOS feature flag is enabled).")
 }
 
 fn get_crashes_tool() -> Tool {
@@ -2468,6 +2509,9 @@ async fn handle_clear_location(
 async fn handle_set_network_condition(
     args: SetNetworkConditionArgs,
 ) -> Result<SetNetworkConditionResponse, McpToolError> {
+    let spec = args
+        .resolve_spec()
+        .map_err(McpToolError::invalid_params)?;
     let device = resolve_connected_device(args.device).await?;
     let message = match device.platform {
         DevicePlatform::IosSimulator => {
@@ -2476,7 +2520,17 @@ async fn handle_set_network_condition(
                     ios_network_throttling_gate_message(),
                 ));
             }
-            catpane_core::ios::set_simulator_network_condition(&device.id, args.preset)
+            // The iOS path doesn't currently accept custom shaping params;
+            // only presets map to its built-in profiles.
+            let preset = match spec {
+                catpane_core::NetworkConditionSpec::Preset { preset } => preset,
+                catpane_core::NetworkConditionSpec::Custom { .. } => {
+                    return Err(McpToolError::invalid_params(
+                        "Custom network shaping parameters are not supported on the iOS Simulator. Pass a 'preset' instead.",
+                    ));
+                }
+            };
+            catpane_core::ios::set_simulator_network_condition(&device.id, preset)
                 .await
                 .map_err(McpToolError::internal)?
         }
@@ -2486,17 +2540,11 @@ async fn handle_set_network_condition(
                 device.id
             )));
         }
-        DevicePlatform::Android => {
-            if !catpane_core::adb::is_emulator(&device.id) {
-                return Err(McpToolError::invalid_params(format!(
-                    "Network throttling is only supported on Android emulators, not physical device '{}'.",
-                    device.id
-                )));
-            }
-            catpane_core::adb::apply_emulator_network_condition(&device.id, args.preset)
-                .await
-                .map_err(McpToolError::internal)?
-        }
+        DevicePlatform::Android => catpane_core::adb::apply_android_network_condition(
+            &device.id, spec,
+        )
+        .await
+        .map_err(McpToolError::internal)?,
     };
     Ok(SetNetworkConditionResponse { message })
 }
@@ -2521,17 +2569,9 @@ async fn handle_clear_network_condition(
                 "Clearing network throttling is only supported on iOS simulators.",
             ));
         }
-        DevicePlatform::Android => {
-            if !catpane_core::adb::is_emulator(&device.id) {
-                return Err(McpToolError::invalid_params(format!(
-                    "Clearing network throttling is only supported on Android emulators, not physical device '{}'.",
-                    device.id
-                )));
-            }
-            catpane_core::adb::clear_emulator_network_condition(&device.id)
-                .await
-                .map_err(McpToolError::internal)?
-        }
+        DevicePlatform::Android => catpane_core::adb::clear_android_network_condition(&device.id)
+            .await
+            .map_err(McpToolError::internal)?,
     };
     Ok(ClearNetworkConditionResponse { message })
 }
@@ -3221,5 +3261,70 @@ mod tests {
 
         assert!(warnings.iter().any(|warning| warning.contains("unscoped iOS capture")));
         assert!(warnings.iter().any(|warning| warning.contains("No watches are active")));
+    }
+
+    #[test]
+    fn set_network_condition_args_resolve_spec_preset() {
+        let args = SetNetworkConditionArgs {
+            device: None,
+            preset: Some(catpane_core::NetworkConditionPreset::ThreeG),
+            custom: None,
+        };
+        let spec = args.resolve_spec().unwrap();
+        assert!(matches!(
+            spec,
+            catpane_core::NetworkConditionSpec::Preset { preset }
+                if preset == catpane_core::NetworkConditionPreset::ThreeG
+        ));
+    }
+
+    #[test]
+    fn set_network_condition_args_resolve_spec_custom() {
+        let args = SetNetworkConditionArgs {
+            device: None,
+            preset: None,
+            custom: Some(catpane_core::CustomNetworkParams {
+                delay_ms: Some(100),
+                ..Default::default()
+            }),
+        };
+        let spec = args.resolve_spec().unwrap();
+        assert!(matches!(spec, catpane_core::NetworkConditionSpec::Custom { .. }));
+    }
+
+    #[test]
+    fn set_network_condition_args_rejects_both() {
+        let args = SetNetworkConditionArgs {
+            device: None,
+            preset: Some(catpane_core::NetworkConditionPreset::Edge),
+            custom: Some(catpane_core::CustomNetworkParams::default()),
+        };
+        let err = args.resolve_spec().unwrap_err();
+        assert!(err.contains("not both"));
+    }
+
+    #[test]
+    fn set_network_condition_args_rejects_neither() {
+        let args = SetNetworkConditionArgs {
+            device: None,
+            preset: None,
+            custom: None,
+        };
+        let err = args.resolve_spec().unwrap_err();
+        assert!(err.contains("required"));
+    }
+
+    #[test]
+    fn set_network_condition_args_rejects_invalid_custom() {
+        let args = SetNetworkConditionArgs {
+            device: None,
+            preset: None,
+            custom: Some(catpane_core::CustomNetworkParams {
+                loss_pct: Some(150.0),
+                ..Default::default()
+            }),
+        };
+        let err = args.resolve_spec().unwrap_err();
+        assert!(err.contains("loss_pct"));
     }
 }

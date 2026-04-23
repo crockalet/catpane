@@ -2,14 +2,15 @@ use egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 
 use super::theme::*;
 use crate::app::{
-    App, DeviceLocationState, DeviceNetworkState, QrPairStatus, QrPairingState, SavedLocation,
-    SidebarTab,
+    App, CustomNetworkForm, DeviceLocationState, DeviceNetworkState, QrPairStatus,
+    QrPairingState, SavedLocation, SidebarTab,
 };
 use crate::pane::WATCH_COLORS;
 use catpane_core::capture::{ConnectedDevice, DevicePlatform};
 use catpane_core::crash_detector::CrashType;
 use catpane_core::{
-    IOS_NETWORK_THROTTLING_ENV, NetworkConditionPreset, ios_network_throttling_enabled,
+    IOS_NETWORK_THROTTLING_ENV, NetworkConditionPreset, NetworkConditionSpec,
+    ios_network_throttling_enabled,
 };
 
 const SIDEBAR_CARD_LEFT_MARGIN: f32 = 4.0;
@@ -1189,18 +1190,21 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
         .and_then(|device_id| app.devices.iter().find(|d| d.id == *device_id))
         .cloned();
 
+    let is_android_emulator = focused_device
+        .as_ref()
+        .is_some_and(|d| d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id));
+    let is_android_physical = focused_device
+        .as_ref()
+        .is_some_and(|d| d.platform == DevicePlatform::Android && !catpane_core::adb::is_emulator(&d.id));
+
     let device_hint = match &focused_device {
         Some(d) if d.platform == DevicePlatform::IosSimulator && ios_feature_enabled => {
             "iOS Simulator"
         }
         Some(d) if d.platform == DevicePlatform::IosSimulator => "iOS Simulator (feature-flagged off)",
         Some(d) if d.platform == DevicePlatform::IosDevice => "iOS Device (not supported)",
-        Some(d)
-            if d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id) =>
-        {
-            "Android Emulator"
-        }
-        Some(d) if d.platform == DevicePlatform::Android => "Android (physical – not supported)",
+        Some(_) if is_android_emulator => "Android Emulator",
+        Some(_) if is_android_physical => "Android (physical – via CatPane helper app)",
         _ => "No device selected",
     };
 
@@ -1212,156 +1216,35 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
     ui.add_space(4.0);
 
     let device_id = focused_device.as_ref().map(|d| d.id.clone());
-    if let Some(ref dev_id) = device_id {
-        if !app.device_networks.contains_key(dev_id) {
-            app.device_networks
-                .insert(dev_id.clone(), DeviceNetworkState::default());
-        }
+    if let Some(ref dev_id) = device_id
+        && !app.device_networks.contains_key(dev_id)
+    {
+        app.device_networks
+            .insert(dev_id.clone(), DeviceNetworkState::default());
     }
 
-    if let Some(dev_id) = &device_id {
-        let network_state = app.device_networks.get_mut(dev_id).unwrap();
-        let ios_feature_hidden = focused_device
-            .as_ref()
-            .is_some_and(|d| d.platform == DevicePlatform::IosSimulator && !ios_feature_enabled);
+    let Some(dev_id) = device_id else {
+        ui.label(RichText::new("Select a device to apply network throttling.").weak());
+        return;
+    };
 
-        if ios_feature_hidden {
-            ui.label(
-                RichText::new(
-                    "iOS Simulator network throttling is hidden by default until CatPane ships a properly signed Network Extension build."
-                )
-                .weak()
-                .size(11.0),
-            );
-            ui.add_space(4.0);
-            ui.monospace(format!("{IOS_NETWORK_THROTTLING_ENV}=1"));
-            ui.add_space(4.0);
-            if let Some((success, message)) = &network_state.status {
-                let color = if *success {
-                    if is_dark { OD_GREEN } else { OL_GREEN }
-                } else if is_dark {
-                    OD_RED
-                } else {
-                    OL_RED
-                };
-                ui.label(RichText::new(message.as_str()).color(color).size(12.0));
-            }
-            return;
-        }
+    let ios_feature_hidden = focused_device
+        .as_ref()
+        .is_some_and(|d| d.platform == DevicePlatform::IosSimulator && !ios_feature_enabled);
 
-        egui::ComboBox::from_id_salt("network_preset_tab")
-            .selected_text(network_state.preset.label())
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                for preset in NetworkConditionPreset::ALL {
-                    ui.selectable_value(&mut network_state.preset, preset, preset.label());
-                }
-            });
-
-        ui.add_space(4.0);
+    if ios_feature_hidden {
+        let network_state = app.device_networks.get(&dev_id);
         ui.label(
             RichText::new(
-                "Android uses emulator speed/delay controls. iOS Simulator uses the bundled native network helper when the iOS feature flag is enabled."
+                "iOS Simulator network throttling is hidden by default until CatPane ships a properly signed Network Extension build."
             )
             .weak()
             .size(11.0),
         );
         ui.add_space(4.0);
-
-        let task_running = app.network_pending.is_some();
-        let can_apply = focused_device.as_ref().is_some_and(|d| {
-            (d.platform == DevicePlatform::IosSimulator && ios_feature_enabled)
-                || (d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id))
-        });
-        let selected_preset = network_state.preset;
-        let status = network_state.status.clone();
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_apply && !task_running, egui::Button::new("Apply Preset"))
-                .clicked()
-            {
-                if let Some(device) = &focused_device {
-                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
-                    app.network_pending = Some((dev_id.clone(), rx));
-                    if let Some(state) = app.device_networks.get_mut(dev_id) {
-                        state.status = None;
-                    }
-                    let device_id = device.id.clone();
-                    let platform = device.platform;
-                    app.rt.spawn(async move {
-                        let result = match platform {
-                            DevicePlatform::IosSimulator => {
-                                catpane_core::ios::set_simulator_network_condition(
-                                    &device_id,
-                                    selected_preset,
-                                )
-                                .await
-                            }
-                            DevicePlatform::IosDevice => Err(
-                                "Network throttling is not supported on physical iOS devices."
-                                    .to_string(),
-                            ),
-                            DevicePlatform::Android => {
-                                catpane_core::adb::apply_emulator_network_condition(
-                                    &device_id,
-                                    selected_preset,
-                                )
-                                .await
-                            }
-                        };
-                        let _ = tx.send(result).await;
-                    });
-                }
-            }
-
-            if ui
-                .add_enabled(can_apply && !task_running, egui::Button::new("Clear"))
-                .clicked()
-            {
-                if let Some(device) = &focused_device {
-                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
-                    app.network_pending = Some((dev_id.clone(), rx));
-                    if let Some(state) = app.device_networks.get_mut(dev_id) {
-                        state.status = None;
-                    }
-                    let device_id = device.id.clone();
-                    let platform = device.platform;
-                    app.rt.spawn(async move {
-                        let result = match platform {
-                            DevicePlatform::IosSimulator => {
-                                catpane_core::ios::clear_simulator_network_condition(&device_id)
-                                    .await
-                            }
-                            DevicePlatform::IosDevice => Err(
-                                "Network throttling is not supported on physical iOS devices."
-                                    .to_string(),
-                            ),
-                            DevicePlatform::Android => {
-                                catpane_core::adb::clear_emulator_network_condition(&device_id)
-                                    .await
-                            }
-                        };
-                        let _ = tx.send(result).await;
-                    });
-                }
-            }
-
-            if status.is_some() && ui.small_button(egui_phosphor::regular::CROSS).clicked() {
-                if let Some(state) = app.device_networks.get_mut(dev_id) {
-                    state.status = None;
-                }
-            }
-        });
-
-        if task_running {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new("Applying network condition…").size(12.0));
-            });
-        }
-
-        if let Some((success, message)) = &status {
+        ui.monospace(format!("{IOS_NETWORK_THROTTLING_ENV}=1"));
+        ui.add_space(4.0);
+        if let Some((success, message)) = network_state.and_then(|s| s.status.as_ref()) {
             let color = if *success {
                 if is_dark { OD_GREEN } else { OL_GREEN }
             } else if is_dark {
@@ -1371,8 +1254,266 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
             };
             ui.label(RichText::new(message.as_str()).color(color).size(12.0));
         }
+        return;
+    }
+
+    // ─── Preset / Custom selector ──────────────────────────────────────────
+    let network_state = app.device_networks.get_mut(&dev_id).unwrap();
+
+    let selected_label: String = if network_state.custom_selected {
+        "Custom".to_string()
     } else {
-        ui.label(RichText::new("Select a device to apply network throttling.").weak());
+        match network_state.spec {
+            NetworkConditionSpec::Preset { preset } => preset.label().to_string(),
+            NetworkConditionSpec::Custom { .. } => "Custom".to_string(),
+        }
+    };
+
+    egui::ComboBox::from_id_salt("network_preset_tab")
+        .selected_text(selected_label.as_str())
+        .width(180.0)
+        .show_ui(ui, |ui| {
+            for preset in NetworkConditionPreset::ALL {
+                let selected = !network_state.custom_selected
+                    && matches!(network_state.spec, NetworkConditionSpec::Preset { preset: p } if p == preset);
+                if ui
+                    .selectable_label(selected, preset.label())
+                    .clicked()
+                {
+                    network_state.custom_selected = false;
+                    network_state.spec = NetworkConditionSpec::preset(preset);
+                }
+            }
+            // Custom is only meaningful for physical Android (helper-driven).
+            if is_android_physical {
+                let selected = network_state.custom_selected;
+                if ui.selectable_label(selected, "Custom").clicked() {
+                    network_state.custom_selected = true;
+                    if let NetworkConditionSpec::Custom { params } = network_state.spec {
+                        network_state.custom_form =
+                            CustomNetworkForm::from_params(&params);
+                    }
+                }
+            }
+        });
+
+    // ─── Custom form (physical Android only) ──────────────────────────────
+    if network_state.custom_selected && is_android_physical {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Leave blank to leave a dimension uncapped.").weak().size(11.0));
+        egui::Grid::new("network_custom_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Delay (ms)");
+                ui.text_edit_singleline(&mut network_state.custom_form.delay_ms);
+                ui.end_row();
+                ui.label("Jitter (ms)");
+                ui.text_edit_singleline(&mut network_state.custom_form.jitter_ms);
+                ui.end_row();
+                ui.label("Loss (%)");
+                ui.text_edit_singleline(&mut network_state.custom_form.loss_pct);
+                ui.end_row();
+                ui.label("Downlink (kbps)");
+                ui.text_edit_singleline(&mut network_state.custom_form.downlink_kbps);
+                ui.end_row();
+                ui.label("Uplink (kbps)");
+                ui.text_edit_singleline(&mut network_state.custom_form.uplink_kbps);
+                ui.end_row();
+            });
+    }
+
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Android emulators use the emulator console; physical Android devices use the bundled CatPane helper app over an adb-forwarded control socket. iOS Simulator uses the bundled native helper when its feature flag is enabled."
+        )
+        .weak()
+        .size(11.0),
+    );
+    ui.add_space(4.0);
+
+    // ─── Apply / Clear actions ────────────────────────────────────────────
+    let task_running = app.network_pending.is_some();
+    let can_apply = focused_device.as_ref().is_some_and(|d| {
+        (d.platform == DevicePlatform::IosSimulator && ios_feature_enabled)
+            || d.platform == DevicePlatform::Android
+    });
+    let status = network_state.status.clone();
+
+    // Resolve the spec the user has on screen; if Custom and parsing fails,
+    // surface the error inline and disable Apply.
+    let resolved_spec: Result<NetworkConditionSpec, String> = if network_state.custom_selected
+        && is_android_physical
+    {
+        network_state
+            .custom_form
+            .to_params()
+            .map(NetworkConditionSpec::custom)
+    } else {
+        Ok(network_state.spec)
+    };
+    let spec_for_apply = resolved_spec.clone().ok();
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                can_apply && !task_running && spec_for_apply.is_some(),
+                egui::Button::new("Apply"),
+            )
+            .clicked()
+            && let Some(device) = &focused_device
+            && let Some(spec) = spec_for_apply.clone()
+        {
+            // Persist what we're applying so the UI keeps it after the form
+            // is dismissed (e.g. if the user picks a preset next).
+            if let Some(state) = app.device_networks.get_mut(&dev_id) {
+                state.spec = spec;
+                state.status = None;
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+            app.network_pending = Some((dev_id.clone(), rx));
+            let device_id = device.id.clone();
+            let platform = device.platform;
+            app.rt.spawn(async move {
+                let result = match platform {
+                    DevicePlatform::IosSimulator => match spec {
+                        NetworkConditionSpec::Preset { preset } => {
+                            catpane_core::ios::set_simulator_network_condition(
+                                &device_id, preset,
+                            )
+                            .await
+                        }
+                        NetworkConditionSpec::Custom { .. } => Err(
+                            "Custom shaping is not supported on the iOS Simulator. Pick a preset."
+                                .to_string(),
+                        ),
+                    },
+                    DevicePlatform::IosDevice => Err(
+                        "Network throttling is not supported on physical iOS devices."
+                            .to_string(),
+                    ),
+                    DevicePlatform::Android => {
+                        catpane_core::adb::apply_android_network_condition(&device_id, spec)
+                            .await
+                    }
+                };
+                let _ = tx.send(result).await;
+            });
+        }
+
+        if ui
+            .add_enabled(can_apply && !task_running, egui::Button::new("Clear"))
+            .clicked()
+            && let Some(device) = &focused_device
+        {
+            if let Some(state) = app.device_networks.get_mut(&dev_id) {
+                state.status = None;
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+            app.network_pending = Some((dev_id.clone(), rx));
+            let device_id = device.id.clone();
+            let platform = device.platform;
+            app.rt.spawn(async move {
+                let result = match platform {
+                    DevicePlatform::IosSimulator => {
+                        catpane_core::ios::clear_simulator_network_condition(&device_id).await
+                    }
+                    DevicePlatform::IosDevice => Err(
+                        "Network throttling is not supported on physical iOS devices."
+                            .to_string(),
+                    ),
+                    DevicePlatform::Android => {
+                        catpane_core::adb::clear_android_network_condition(&device_id).await
+                    }
+                };
+                let _ = tx.send(result).await;
+            });
+        }
+
+        if status.is_some() && ui.small_button(egui_phosphor::regular::CROSS).clicked()
+            && let Some(state) = app.device_networks.get_mut(&dev_id)
+        {
+            state.status = None;
+        }
+    });
+
+    // Inline parse-error from the Custom form, if any.
+    if let Err(err) = &resolved_spec {
+        let color = if is_dark { OD_RED } else { OL_RED };
+        ui.label(RichText::new(err.as_str()).color(color).size(11.0));
+    }
+
+    // ─── Helper-app install CTA (physical Android only) ───────────────────
+    if is_android_physical {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Physical Android throttling requires the CatPane helper app on the device.",
+            )
+            .weak()
+            .size(11.0),
+        );
+        ui.horizontal(|ui| {
+            let install_busy = app.network_pending.is_some();
+            if ui
+                .add_enabled(!install_busy, egui::Button::new("Install / launch helper"))
+                .clicked()
+                && let Some(device) = &focused_device
+            {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(1);
+                app.network_pending = Some((dev_id.clone(), rx));
+                let serial = device.id.clone();
+                app.rt.spawn(async move {
+                    let install_result =
+                        catpane_core::throttle_android::ensure_helper_installed(&serial).await;
+                    let result = match install_result {
+                        Ok(catpane_core::throttle_android::HelperInstallStatus::AlreadyInstalled) => {
+                            catpane_core::throttle_android::launch_helper_for_permission(&serial)
+                                .await
+                                .map(|_| {
+                                    "Helper already installed; opened it on the device so you can grant VPN permission.".to_string()
+                                })
+                        }
+                        Ok(catpane_core::throttle_android::HelperInstallStatus::Installed) => {
+                            catpane_core::throttle_android::launch_helper_for_permission(&serial)
+                                .await
+                                .map(|_| {
+                                    "Helper installed and opened on the device — please grant VPN permission.".to_string()
+                                })
+                        }
+                        Ok(catpane_core::throttle_android::HelperInstallStatus::HelperApkMissing) => Err(
+                            format!(
+                                "CatPane helper APK not bundled with this build. Set {} to a local APK path or install a release that includes it.",
+                                catpane_core::throttle_android::HELPER_APK_ENV
+                            ),
+                        ),
+                        Err(e) => Err(e),
+                    };
+                    let _ = tx.send(result).await;
+                });
+            }
+        });
+    }
+
+    if task_running {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("Working…").size(12.0));
+        });
+    }
+
+    if let Some((success, message)) = &status {
+        let color = if *success {
+            if is_dark { OD_GREEN } else { OL_GREEN }
+        } else if is_dark {
+            OD_RED
+        } else {
+            OL_RED
+        };
+        ui.label(RichText::new(message.as_str()).color(color).size(12.0));
     }
 }
 

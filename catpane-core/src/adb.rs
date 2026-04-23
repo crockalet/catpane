@@ -927,6 +927,46 @@ pub async fn clear_emulator_network_condition(serial: &str) -> Result<String, St
     Ok(format!("Cleared network throttling on {}", serial))
 }
 
+/// Dispatch a [`NetworkConditionSpec`] to the right Android backend.
+///
+/// * **Emulators** continue to use the existing `adb emu network …` console
+///   commands. Custom shaping params are not supported by the emulator
+///   console, so they're rejected up front with a clear message; preset
+///   specs are applied as before.
+/// * **Physical devices** route through the CatPane helper app
+///   ([`crate::throttle_android`]) over an `adb forward`-backed control
+///   socket. Both presets and custom params are supported.
+pub async fn apply_android_network_condition(
+    serial: &str,
+    spec: crate::network_condition::NetworkConditionSpec,
+) -> Result<String, String> {
+    spec.validate()?;
+    if is_emulator(serial) {
+        match spec {
+            crate::network_condition::NetworkConditionSpec::Preset { preset } => {
+                apply_emulator_network_condition(serial, preset).await
+            }
+            crate::network_condition::NetworkConditionSpec::Custom { .. } => Err(
+                "Custom network shaping parameters are not supported on Android emulators. \
+                 Pick a preset (unthrottled / edge / 3g / offline) or use a physical device \
+                 with the CatPane helper app installed."
+                    .to_string(),
+            ),
+        }
+    } else {
+        crate::throttle_android::apply_device_network_condition(serial, spec).await
+    }
+}
+
+/// Dispatch a "clear throttling" request to the right Android backend.
+pub async fn clear_android_network_condition(serial: &str) -> Result<String, String> {
+    if is_emulator(serial) {
+        clear_emulator_network_condition(serial).await
+    } else {
+        crate::throttle_android::clear_device_network_condition(serial).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

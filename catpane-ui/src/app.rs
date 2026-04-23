@@ -1,7 +1,7 @@
 use crate::pane::{Pane, PaneId, PaneNode, SplitDir, default_word_wrap};
 use catpane_core::capture::{self, CaptureController, ConnectedDevice};
 use catpane_core::log_entry::{LogEntry, LogLevel};
-use catpane_core::NetworkConditionPreset;
+use catpane_core::{CustomNetworkParams, NetworkConditionPreset, NetworkConditionSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -38,17 +38,91 @@ impl Default for DeviceLocationState {
     }
 }
 
+/// Per-device network throttling state held by the UI.
+///
+/// Stores both the structured spec we'll send to the backend and string
+/// scratch buffers for the Custom inputs (so the user can type partial values
+/// without us parsing on every keystroke).
 pub struct DeviceNetworkState {
-    pub preset: NetworkConditionPreset,
+    pub spec: NetworkConditionSpec,
+    /// Whether the UI is in "Custom" mode (selected from the preset combo).
+    pub custom_selected: bool,
+    pub custom_form: CustomNetworkForm,
     pub status: Option<(bool, String)>,
+    /// Last known helper-installed state (for physical Android targets).
+    pub helper_installed: Option<bool>,
 }
 
 impl Default for DeviceNetworkState {
     fn default() -> Self {
         Self {
-            preset: NetworkConditionPreset::Unthrottled,
+            spec: NetworkConditionSpec::preset(NetworkConditionPreset::Unthrottled),
+            custom_selected: false,
+            custom_form: CustomNetworkForm::default(),
             status: None,
+            helper_installed: None,
         }
+    }
+}
+
+/// String-backed editor for [`CustomNetworkParams`]. Empty strings mean
+/// "leave this dimension uncapped".
+#[derive(Default)]
+pub struct CustomNetworkForm {
+    pub delay_ms: String,
+    pub jitter_ms: String,
+    pub loss_pct: String,
+    pub downlink_kbps: String,
+    pub uplink_kbps: String,
+}
+
+impl CustomNetworkForm {
+    pub fn from_params(params: &CustomNetworkParams) -> Self {
+        Self {
+            delay_ms: params.delay_ms.map(|v| v.to_string()).unwrap_or_default(),
+            jitter_ms: params.jitter_ms.map(|v| v.to_string()).unwrap_or_default(),
+            loss_pct: params.loss_pct.map(|v| v.to_string()).unwrap_or_default(),
+            downlink_kbps: params
+                .downlink_kbps
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            uplink_kbps: params.uplink_kbps.map(|v| v.to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// Parses the form into a [`CustomNetworkParams`]. Empty fields → `None`.
+    /// Returns the first parse error encountered, with the offending field
+    /// name in the message.
+    pub fn to_params(&self) -> Result<CustomNetworkParams, String> {
+        fn parse_u32(name: &str, s: &str) -> Result<Option<u32>, String> {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| format!("'{name}' must be a non-negative integer"))
+        }
+        fn parse_f32(name: &str, s: &str) -> Result<Option<f32>, String> {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<f32>()
+                .map(Some)
+                .map_err(|_| format!("'{name}' must be a number"))
+        }
+        let params = CustomNetworkParams {
+            delay_ms: parse_u32("delay_ms", &self.delay_ms)?,
+            jitter_ms: parse_u32("jitter_ms", &self.jitter_ms)?,
+            loss_pct: parse_f32("loss_pct", &self.loss_pct)?,
+            downlink_kbps: parse_u32("downlink_kbps", &self.downlink_kbps)?,
+            uplink_kbps: parse_u32("uplink_kbps", &self.uplink_kbps)?,
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 
@@ -864,5 +938,44 @@ mod tests {
         .unwrap();
 
         assert!(!session.sidebar_open);
+    }
+
+    #[test]
+    fn custom_network_form_round_trip() {
+        let params = catpane_core::CustomNetworkParams {
+            delay_ms: Some(150),
+            jitter_ms: Some(20),
+            loss_pct: Some(2.5),
+            downlink_kbps: Some(1500),
+            uplink_kbps: None,
+        };
+        let form = super::CustomNetworkForm::from_params(&params);
+        assert_eq!(form.delay_ms, "150");
+        assert_eq!(form.uplink_kbps, "");
+        let parsed = form.to_params().unwrap();
+        assert_eq!(parsed, params);
+    }
+
+    #[test]
+    fn custom_network_form_rejects_garbage() {
+        let mut form = super::CustomNetworkForm::default();
+        form.delay_ms = "abc".to_string();
+        let err = form.to_params().unwrap_err();
+        assert!(err.contains("delay_ms"));
+    }
+
+    #[test]
+    fn custom_network_form_validates_bounds() {
+        let mut form = super::CustomNetworkForm::default();
+        form.loss_pct = "150".to_string();
+        let err = form.to_params().unwrap_err();
+        assert!(err.contains("loss_pct"));
+    }
+
+    #[test]
+    fn custom_network_form_blank_means_unset() {
+        let form = super::CustomNetworkForm::default();
+        let parsed = form.to_params().unwrap();
+        assert!(parsed.is_empty());
     }
 }

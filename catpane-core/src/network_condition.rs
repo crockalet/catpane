@@ -122,9 +122,146 @@ pub struct AndroidEmulatorNetworkProfile {
     pub data_enabled: bool,
 }
 
+/// User-tunable shaping parameters for the Android helper VPN.
+///
+/// All fields are optional in serde so callers can omit values they don't want
+/// to constrain (e.g. only set `delay_ms` and leave bandwidth uncapped).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct CustomNetworkParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<u32>,
+    /// Packet loss as a percentage in the range `0.0..=100.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_pct: Option<f32>,
+    /// Downlink (device-bound) bandwidth cap in kilobits per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downlink_kbps: Option<u32>,
+    /// Uplink (device-originated) bandwidth cap in kilobits per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink_kbps: Option<u32>,
+}
+
+impl CustomNetworkParams {
+    pub const MAX_DELAY_MS: u32 = 60_000;
+    pub const MAX_JITTER_MS: u32 = 60_000;
+    pub const MAX_BANDWIDTH_KBPS: u32 = 10_000_000;
+
+    /// Returns true if every field is `None` (i.e. effectively unthrottled).
+    pub fn is_empty(&self) -> bool {
+        self.delay_ms.is_none()
+            && self.jitter_ms.is_none()
+            && self.loss_pct.is_none()
+            && self.downlink_kbps.is_none()
+            && self.uplink_kbps.is_none()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(delay) = self.delay_ms
+            && delay > Self::MAX_DELAY_MS
+        {
+            return Err(format!(
+                "delay_ms must be <= {} (got {delay})",
+                Self::MAX_DELAY_MS
+            ));
+        }
+        if let Some(jitter) = self.jitter_ms
+            && jitter > Self::MAX_JITTER_MS
+        {
+            return Err(format!(
+                "jitter_ms must be <= {} (got {jitter})",
+                Self::MAX_JITTER_MS
+            ));
+        }
+        if let Some(loss) = self.loss_pct
+            && !(0.0..=100.0).contains(&loss)
+        {
+            return Err(format!(
+                "loss_pct must be in 0.0..=100.0 (got {loss})"
+            ));
+        }
+        if let Some(loss) = self.loss_pct
+            && !loss.is_finite()
+        {
+            return Err("loss_pct must be a finite number".to_string());
+        }
+        if let Some(down) = self.downlink_kbps
+            && down > Self::MAX_BANDWIDTH_KBPS
+        {
+            return Err(format!(
+                "downlink_kbps must be <= {} (got {down})",
+                Self::MAX_BANDWIDTH_KBPS
+            ));
+        }
+        if let Some(up) = self.uplink_kbps
+            && up > Self::MAX_BANDWIDTH_KBPS
+        {
+            return Err(format!(
+                "uplink_kbps must be <= {} (got {up})",
+                Self::MAX_BANDWIDTH_KBPS
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A unified network-condition specification used by the UI, MCP layer, and
+/// device dispatchers. Either a named preset or a fully custom shaping profile.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NetworkConditionSpec {
+    Preset {
+        preset: NetworkConditionPreset,
+    },
+    Custom {
+        #[serde(flatten)]
+        params: CustomNetworkParams,
+    },
+}
+
+impl NetworkConditionSpec {
+    pub fn preset(preset: NetworkConditionPreset) -> Self {
+        Self::Preset { preset }
+    }
+
+    pub fn custom(params: CustomNetworkParams) -> Self {
+        Self::Custom { params }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Preset { .. } => Ok(()),
+            Self::Custom { params } => params.validate(),
+        }
+    }
+
+    /// True when the spec corresponds to "no throttling at all".
+    pub fn is_unthrottled(&self) -> bool {
+        match self {
+            Self::Preset { preset } => *preset == NetworkConditionPreset::Unthrottled,
+            Self::Custom { params } => params.is_empty(),
+        }
+    }
+
+    /// Short human-readable label for status surfaces (UI, MCP responses).
+    pub fn label(&self) -> String {
+        match self {
+            Self::Preset { preset } => preset.label().to_string(),
+            Self::Custom { .. } => "Custom".to_string(),
+        }
+    }
+}
+
+impl From<NetworkConditionPreset> for NetworkConditionSpec {
+    fn from(preset: NetworkConditionPreset) -> Self {
+        Self::Preset { preset }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::NetworkConditionPreset;
+    use super::{CustomNetworkParams, NetworkConditionPreset, NetworkConditionSpec};
 
     #[test]
     fn parses_supported_slugs_and_aliases() {
@@ -148,6 +285,75 @@ mod tests {
         assert!(err.contains("Unsupported network condition"));
         assert!(err.contains("unthrottled"));
         assert!(err.contains("offline"));
+    }
+
+    #[test]
+    fn custom_params_validates_bounds() {
+        let mut params = CustomNetworkParams {
+            delay_ms: Some(100),
+            jitter_ms: Some(20),
+            loss_pct: Some(5.0),
+            downlink_kbps: Some(1_000),
+            uplink_kbps: Some(500),
+        };
+        assert!(params.validate().is_ok());
+
+        params.loss_pct = Some(150.0);
+        assert!(params.validate().unwrap_err().contains("loss_pct"));
+
+        params.loss_pct = Some(f32::NAN);
+        assert!(params.validate().is_err());
+
+        params.loss_pct = Some(0.0);
+        params.delay_ms = Some(CustomNetworkParams::MAX_DELAY_MS + 1);
+        assert!(params.validate().unwrap_err().contains("delay_ms"));
+    }
+
+    #[test]
+    fn custom_params_is_empty_when_all_none() {
+        assert!(CustomNetworkParams::default().is_empty());
+        let p = CustomNetworkParams {
+            delay_ms: Some(1),
+            ..Default::default()
+        };
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn spec_serde_round_trip() {
+        let preset = NetworkConditionSpec::preset(NetworkConditionPreset::ThreeG);
+        let json = serde_json::to_string(&preset).unwrap();
+        assert!(json.contains("\"kind\":\"preset\""));
+        assert!(json.contains("\"preset\":\"3g\""));
+        let back: NetworkConditionSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, preset);
+
+        let custom = NetworkConditionSpec::custom(CustomNetworkParams {
+            delay_ms: Some(250),
+            loss_pct: Some(2.5),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&custom).unwrap();
+        assert!(json.contains("\"kind\":\"custom\""));
+        assert!(json.contains("\"delay_ms\":250"));
+        // Unset fields should be omitted to keep the wire format compact.
+        assert!(!json.contains("downlink_kbps"));
+        let back: NetworkConditionSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, custom);
+    }
+
+    #[test]
+    fn spec_is_unthrottled() {
+        assert!(
+            NetworkConditionSpec::preset(NetworkConditionPreset::Unthrottled).is_unthrottled()
+        );
+        assert!(!NetworkConditionSpec::preset(NetworkConditionPreset::Edge).is_unthrottled());
+        assert!(NetworkConditionSpec::custom(CustomNetworkParams::default()).is_unthrottled());
+        assert!(!NetworkConditionSpec::custom(CustomNetworkParams {
+            delay_ms: Some(10),
+            ..Default::default()
+        })
+        .is_unthrottled());
     }
 
     #[test]

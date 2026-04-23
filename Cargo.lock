@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "catpane-cli"
-version = "0.5.5"
+version = "0.5.6-beta.1"
 dependencies = [
  "catpane-core",
  "catpane-mcp",
@@ -704,6 +704,7 @@ dependencies = [
 name = "catpane-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "egui",
  "mdns-sd",
  "qrcode",

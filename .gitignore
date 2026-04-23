@@ -14,3 +14,10 @@ codedb.snapshot
 
 # macOS Finder metadata
 .DS_Store
+
+# Android helper build artifacts
+android/catpane-helper-app/.gradle/
+android/catpane-helper-app/build/
+android/catpane-helper-app/app/build/
+android/catpane-helper-app/local.properties
+target/helper-apk/

@@ -303,6 +303,19 @@ if [[ -f "$ICON_FILE" ]]; then
   cp "$ICON_FILE" "$RESOURCES_DIR/$ICON_NAME"
 fi
 
+# Embed the Android helper APK if present so users can throttle physical
+# Android devices without an extra download. Honour CATPANE_HELPER_APK if the
+# caller wants to point at a pre-built APK; otherwise fall back to the
+# scripts/build-helper-apk.sh output location.
+HELPER_APK_SRC="${CATPANE_HELPER_APK:-$ROOT_DIR/target/helper-apk/catpane-helper.apk}"
+if [[ -f "$HELPER_APK_SRC" ]]; then
+  cp "$HELPER_APK_SRC" "$RESOURCES_DIR/catpane-helper.apk"
+  echo "Embedded Android helper APK from $HELPER_APK_SRC"
+else
+  echo "Note: helper APK not found at $HELPER_APK_SRC — physical Android throttling will require a manual install" >&2
+fi
+
+
 cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

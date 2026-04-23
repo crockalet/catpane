@@ -10,7 +10,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for minimal memory usage
 - **Multi-window** — open additional windows with ⌘N / Ctrl+N
 - **Android + iOS targets** — capture from connected Android devices, booted iOS simulators, and wired physical iOS devices on macOS
 - **Boot iOS simulators** — launch an available iOS simulator directly from CatPane on macOS
-- **Network throttling presets** — apply `unthrottled`, `edge`, `3g`, or `offline` to Android emulators; iOS simulator support remains feature-flagged off by default until CatPane ships a signed Network Extension build
+- **Network throttling presets** — apply `unthrottled`, `edge`, `3g`, or `offline` to Android emulators **and physical Android devices** (via the bundled CatPane Helper VPN app); iOS simulator support remains feature-flagged off by default until CatPane ships a signed Network Extension build. Physical Android targets also accept fully custom shaping (`delay_ms`, `jitter_ms`, `loss_pct`, `downlink_kbps`, `uplink_kbps`).
 - **Tag filters** — Android Studio-style syntax with include, exclude, regex, and per-tag levels:
   - `tag:Name` — include only this tag
   - `tag-:Exclude` — hide this tag
@@ -129,7 +129,33 @@ Example MCP client config using stdio transport:
 
 Use `start_capture` to begin buffering logs for a device or iOS capture target, then query them with `get_logs`. For iOS captures, prefer `process`, `text`, and simulator `predicate` scope so irrelevant logs do not churn the main buffer. Physical iOS captures also auto-stop after 15 minutes of MCP inactivity by default, so agents should keep polling `get_logs`, `get_status`, or `get_watch_matches` during an active debugging session and explicitly `stop_capture` when done. Set `CATPANE_IOS_DEVICE_IDLE_TIMEOUT_SECS=0` to disable that timeout or use another positive value to tune it. `clear_logs` resets the current observation window, `get_status` shows active captures plus scope/buffer warnings, `get_crashes` surfaces structured crash reports, and `create_watch` + `get_watch_matches` let agents pin high-signal lines so they survive main-buffer overflow. `get_logs` also supports iOS-specific `process`, `subsystem`, and `category` filters, though physical-device logs may not populate every field.
 
-`set_network_condition` applies one of the named presets (`unthrottled`, `edge`, `3g`, `offline`) to a supported target. Android support is limited to emulators. iOS support is limited to simulators, currently targets the Simulator host app as a whole, depends on a properly signed macOS build with matching host + extension provisioning profiles, and is feature-flagged off by default until those signed builds are available.
+`set_network_condition` applies a network condition to a supported target. It accepts either a named preset (`unthrottled`, `edge`, `3g`, `offline`) or — on physical Android devices — a `custom` object with any of `delay_ms`, `jitter_ms`, `loss_pct`, `downlink_kbps`, `uplink_kbps`. Android emulators support presets only. iOS support is limited to simulators, currently targets the Simulator host app as a whole, depends on a properly signed macOS build with matching host + extension provisioning profiles, and is feature-flagged off by default until those signed builds are available.
+
+### Throttling physical Android devices
+
+Physical Android throttling is implemented by a small companion app (**CatPane Helper**, package `dev.catpane.helper`) that uses `VpnService` to capture device traffic into a local TUN and shapes it (delay, jitter, loss, bandwidth). CatPane controls the helper over `adb forward` + a local TCP socket — no rooting, no extra permissions on the host beyond `adb`.
+
+What ships:
+
+- The signed-debug APK is bundled into the macOS app at `Resources/catpane-helper.apk`. Set `CATPANE_HELPER_APK=/path/to/your.apk` to override the lookup.
+- CatPane installs and updates the helper for you via `adb install -r -g`. The first time you apply throttling on a device, you must open the helper app on the phone once and tap **Grant VPN permission** (one-time, per device).
+- Default LAN exclusion is **ADB host only** so wireless debugging keeps working while the VPN is up. Toggle it from the helper UI to `Full LAN` (excludes the whole local subnet) or `None` (full tunnel — may break wireless ADB).
+
+Manual test checklist (no automated coverage on real devices):
+
+1. Plug in or pair a physical Android device.
+2. In CatPane → Network tab, select **3G**. Confirm the helper installs, the device prompts for VPN permission, and after granting, traffic on the device feels throttled.
+3. With wireless debugging active, switch the helper to **Full LAN** and confirm CatPane loses the device (expected) and recovers when you switch back to **ADB host only**.
+4. Apply **Custom** with `loss_pct: 100` and confirm the device behaves as offline.
+5. Click **Clear** and confirm normal traffic resumes; the helper notification disappears.
+
+Known limitations:
+
+- Only one VPN can be active on Android at a time. If the user already has another VPN running, CatPane returns `already_another_vpn_active`.
+- Some OEM system traffic (Samsung/Xiaomi telemetry, push services) bypasses VPN routing.
+- The v1 packet pump drains shaped packets without re-injection. This gives correct semantics for `offline`, `delay`, `jitter`, and `loss` plus a downlink rate cap, but a full forwarder (v2) is needed for richer mixed-traffic scenarios.
+- Wireless ADB pairing must complete *before* the VPN is started; once shaping is on with `adb_host_only` exclusion, existing connections survive.
+
 
 ### Agent skill via `vercel-labs/skills`
 
