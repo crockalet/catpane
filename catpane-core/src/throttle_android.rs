@@ -33,6 +33,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::adb::adb_binary;
 use crate::network_condition::{CustomNetworkParams, NetworkConditionPreset, NetworkConditionSpec};
 
 /// Package identifier of the CatPane Android helper app.
@@ -250,7 +251,7 @@ async fn ensure_forward(serial: &str) -> Result<u16, String> {
         }
     }
     let host_port = pick_free_port()?;
-    let mut cmd = tokio::process::Command::new("adb");
+    let mut cmd = tokio::process::Command::new(adb_binary());
     cmd.args([
         "-s",
         serial,
@@ -280,7 +281,7 @@ pub async fn release_forward(serial: &str) {
         map.remove(serial)
     };
     if let Some(port) = port {
-        let _ = tokio::process::Command::new("adb")
+        let _ = tokio::process::Command::new(adb_binary())
             .args(["-s", serial, "forward", "--remove", &format!("tcp:{port}")])
             .output()
             .await;
@@ -353,7 +354,7 @@ pub enum HelperInstallStatus {
 
 /// Returns `true` when `pm path dev.catpane.helper` reports an installed APK.
 pub async fn is_helper_installed(serial: &str) -> Result<bool, String> {
-    let out = tokio::process::Command::new("adb")
+    let out = tokio::process::Command::new(adb_binary())
         .args(["-s", serial, "shell", "pm", "path", HELPER_PACKAGE])
         .output()
         .await
@@ -379,7 +380,7 @@ pub async fn ensure_helper_installed(serial: &str) -> Result<HelperInstallStatus
             return Ok(HelperInstallStatus::HelperApkMissing);
         }
     };
-    let out = tokio::process::Command::new("adb")
+    let out = tokio::process::Command::new(adb_binary())
         .args([
             "-s",
             serial,
@@ -407,7 +408,7 @@ pub async fn ensure_helper_installed(serial: &str) -> Result<HelperInstallStatus
 /// the control protocol (`status.vpn_permission_granted`).
 pub async fn launch_helper_for_permission(serial: &str) -> Result<(), String> {
     let component = format!("{HELPER_PACKAGE}/.MainActivity");
-    let out = tokio::process::Command::new("adb")
+    let out = tokio::process::Command::new(adb_binary())
         .args([
             "-s", serial, "shell", "am", "start", "-n", &component, "--es", "reason",
             "request_vpn_permission",
