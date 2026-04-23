@@ -1,4 +1,4 @@
-cask "catpane" do
+cask "__CASK_NAME__" do
   version "__VERSION__"
 
   on_arm do

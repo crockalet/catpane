@@ -36,8 +36,8 @@ jobs:
           fi
           # Anything with a SemVer pre-release suffix (e.g. v0.4.0-beta.1,
           # v0.4.0-alpha.2, v0.4.0-rc.1) is treated as a prerelease channel:
-          # GitHub release marked prerelease, Homebrew cask publish skipped so
-          # stable users on `brew upgrade` are not bumped.
+          # GitHub release marked prerelease, Homebrew publish goes to the
+          # separate `catpane@beta` cask instead of the stable `catpane` cask.
           if [[ "${release_tag}" == *-* ]]; then
             prerelease=true
           else
@@ -159,7 +159,8 @@ jobs:
     needs: [release-meta, build-macos]
     runs-on: ubuntu-latest
     env:
-      CASK_OUTPUT_PATH: ${{ github.workspace }}/dist/artifacts/homebrew/Casks/catpane.rb
+      CASK_NAME: ${{ needs.release-meta.outputs.prerelease == 'true' && 'catpane@beta' || 'catpane' }}
+      CASK_OUTPUT_PATH: ${{ format('{0}/dist/artifacts/homebrew/Casks/{1}.rb', github.workspace, needs.release-meta.outputs.prerelease == 'true' && 'catpane@beta' || 'catpane') }}
       HOMEBREW_TAP_REPOSITORY: ${{ secrets.HOMEBREW_TAP_REPOSITORY }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       HOMEBREW_TAP_BRANCH: ${{ secrets.HOMEBREW_TAP_BRANCH }}
@@ -170,6 +171,7 @@ jobs:
           path: dist/artifacts
       - name: Render Homebrew cask
         env:
+          CASK_NAME: ${{ env.CASK_NAME }}
           DIST_DIR: ${{ github.workspace }}/dist/artifacts
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
@@ -198,8 +200,9 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" "${create_flags[@]}" --generate-notes --title "$RELEASE_TAG"
           fi
       - name: Publish Homebrew tap
-        if: ${{ env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != '' && needs.release-meta.outputs.prerelease != 'true' }}
+        if: ${{ env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != '' }}
         env:
+          CASK_NAME: ${{ env.CASK_NAME }}
           CASK_SOURCE: ${{ env.CASK_OUTPUT_PATH }}
           RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
         run: scripts/publish-homebrew-tap.sh

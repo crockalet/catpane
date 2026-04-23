@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
 TEMPLATE_PATH="${TEMPLATE_PATH:-$ROOT_DIR/packaging/homebrew/catpane.template.rb}"
-OUTPUT_PATH="${OUTPUT_PATH:-$DIST_DIR/homebrew/Casks/catpane.rb}"
 REPOSITORY="${REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 CLI_MANIFEST="${CLI_MANIFEST:-$ROOT_DIR/catpane-cli/Cargo.toml}"
+CASK_NAME="${CASK_NAME:-catpane}"
+OUTPUT_PATH="${OUTPUT_PATH:-$DIST_DIR/homebrew/Casks/${CASK_NAME}.rb}"
 
 DEFAULT_VERSION="$(
   "$PYTHON_BIN" - "$CLI_MANIFEST" <<'PY'
@@ -60,7 +61,7 @@ INTEL_SHA="$(tr -d '[:space:]' < "$INTEL_SHA_FILE")"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
-"$PYTHON_BIN" - "$TEMPLATE_PATH" "$OUTPUT_PATH" "$VERSION" "$REPOSITORY" "$ARM64_SHA" "$INTEL_SHA" <<'PY'
+"$PYTHON_BIN" - "$TEMPLATE_PATH" "$OUTPUT_PATH" "$VERSION" "$REPOSITORY" "$ARM64_SHA" "$INTEL_SHA" "$CASK_NAME" <<'PY'
 import pathlib
 import sys
 
@@ -70,6 +71,7 @@ version = sys.argv[3]
 repository = sys.argv[4]
 arm64_sha = sys.argv[5]
 intel_sha = sys.argv[6]
+cask_name = sys.argv[7]
 
 rendered = template_path.read_text()
 for placeholder, value in {
@@ -77,6 +79,7 @@ for placeholder, value in {
     "__REPOSITORY__": repository,
     "__SHA_ARM64__": arm64_sha,
     "__SHA_X86_64__": intel_sha,
+    "__CASK_NAME__": cask_name,
 }.items():
     rendered = rendered.replace(placeholder, value)
 

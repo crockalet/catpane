@@ -48,6 +48,15 @@ brew install --cask --no-quarantine crockalet/catpane/catpane
 
 Use `--no-quarantine` for now until CatPane is signed and notarized.
 
+For beta builds:
+
+```sh
+brew tap crockalet/catpane
+brew install --cask --no-quarantine crockalet/catpane/catpane@beta
+```
+
+Pre-release tags publish only `catpane@beta`. Stable releases continue to update `catpane`, and when a stable release overtakes the current beta, the tap removes `catpane@beta` until the next beta ships.
+
 ### Optional runtime dependencies
 
 CatPane discovers connected devices automatically, but each platform needs its own tooling installed:
