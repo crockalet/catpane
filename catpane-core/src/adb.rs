@@ -904,8 +904,12 @@ pub async fn apply_emulator_network_condition(
     }
 
     if profile.wifi_enabled {
-        run_android_shell_command(serial, &["svc", "wifi", "enable"], "enabling emulator Wi-Fi")
-            .await?;
+        run_android_shell_command(
+            serial,
+            &["svc", "wifi", "enable"],
+            "enabling emulator Wi-Fi",
+        )
+        .await?;
     } else {
         run_android_shell_command(
             serial,

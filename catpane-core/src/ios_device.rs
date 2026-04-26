@@ -19,10 +19,15 @@ pub struct IosDevice {
 
 pub fn idevicesyslog_binary() -> &'static str {
     static IDEVICESYSLOG_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    IDEVICESYSLOG_PATH.get_or_init(|| resolve_binary("idevicesyslog", [
-        "/opt/homebrew/bin/idevicesyslog",
-        "/usr/local/bin/idevicesyslog",
-    ]))
+    IDEVICESYSLOG_PATH.get_or_init(|| {
+        resolve_binary(
+            "idevicesyslog",
+            [
+                "/opt/homebrew/bin/idevicesyslog",
+                "/usr/local/bin/idevicesyslog",
+            ],
+        )
+    })
 }
 
 pub fn idevicesyslog_available() -> bool {
@@ -126,9 +131,8 @@ struct DevicectlHardwareProperties {
 }
 
 fn parse_devices(stdout: &[u8]) -> Result<Vec<IosDevice>, String> {
-    let parsed: DevicectlList = serde_json::from_slice(stdout).map_err(|err| {
-        format!("Failed to parse `xcrun devicectl list devices` output: {err}")
-    })?;
+    let parsed: DevicectlList = serde_json::from_slice(stdout)
+        .map_err(|err| format!("Failed to parse `xcrun devicectl list devices` output: {err}"))?;
 
     let mut devices = parsed
         .result
@@ -165,12 +169,14 @@ fn parse_devices(stdout: &[u8]) -> Result<Vec<IosDevice>, String> {
                 .unwrap_or_else(|| udid.clone());
 
             let mut description_parts = Vec::new();
-            if let Some(model) = normalize_optional_string(&device.hardware_properties.marketing_name)
+            if let Some(model) =
+                normalize_optional_string(&device.hardware_properties.marketing_name)
                 && model != name
             {
                 description_parts.push(model);
             }
-            if let Some(version) = normalize_optional_string(&device.device_properties.os_version_number)
+            if let Some(version) =
+                normalize_optional_string(&device.device_properties.os_version_number)
             {
                 description_parts.push(format!("iOS {version}"));
             }
@@ -198,7 +204,10 @@ fn devicectl_json_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("catpane-devicectl-{}-{now}.json", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "catpane-devicectl-{}-{now}.json",
+        std::process::id()
+    ))
 }
 
 pub async fn list_connected_devices_strict() -> Result<Vec<IosDevice>, String> {
@@ -209,7 +218,13 @@ pub async fn list_connected_devices_strict() -> Result<Vec<IosDevice>, String> {
     let json_path = devicectl_json_path();
     let json_path_string = json_path.to_string_lossy().into_owned();
     let command = xcrun_command(
-        ["devicectl", "list", "devices", "--json-output", &json_path_string],
+        [
+            "devicectl",
+            "list",
+            "devices",
+            "--json-output",
+            &json_path_string,
+        ],
         "listing connected physical iOS devices",
         DEVICE_LIST_TIMEOUT,
     );
@@ -307,7 +322,10 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].udid, "00008130-000618A91E08001C");
         assert_eq!(devices[0].name, "Yaniu");
-        assert_eq!(devices[0].description, "iPhone 15 Pro Max · iOS 26.3.1 · USB");
+        assert_eq!(
+            devices[0].description,
+            "iPhone 15 Pro Max · iOS 26.3.1 · USB"
+        );
     }
 
     #[test]

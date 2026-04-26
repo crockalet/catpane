@@ -362,12 +362,8 @@ impl SetNetworkConditionArgs {
     /// rejecting requests that supply both or neither.
     pub fn resolve_spec(&self) -> Result<catpane_core::NetworkConditionSpec, String> {
         match (self.preset, self.custom) {
-            (Some(_), Some(_)) => Err(
-                "Provide either 'preset' or 'custom', not both.".to_string(),
-            ),
-            (None, None) => Err(
-                "One of 'preset' or 'custom' is required.".to_string(),
-            ),
+            (Some(_), Some(_)) => Err("Provide either 'preset' or 'custom', not both.".to_string()),
+            (None, None) => Err("One of 'preset' or 'custom' is required.".to_string()),
             (Some(p), None) => Ok(catpane_core::NetworkConditionSpec::preset(p)),
             (None, Some(c)) => {
                 let spec = catpane_core::NetworkConditionSpec::custom(c);
@@ -416,6 +412,8 @@ pub struct CreateWatchArgs {
     pub tag: Option<String>,
     #[serde(default)]
     pub min_level: Option<String>,
+    #[serde(default)]
+    pub retained_capacity: Option<usize>,
 }
 
 impl CreateWatchArgs {
@@ -429,6 +427,7 @@ impl CreateWatchArgs {
 pub struct CreateWatchResponse {
     pub watch_id: String,
     pub name: String,
+    pub retained_capacity: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1150,7 +1149,14 @@ impl McpRuntimeState {
             .as_deref()
             .map(parse_log_level)
             .transpose()?;
-        let retention_capacity = shared.watch_retention_capacity;
+        let retention_capacity = args
+            .retained_capacity
+            .unwrap_or(shared.watch_retention_capacity);
+        if retention_capacity == 0 {
+            return Err(McpToolError::invalid_params(
+                "retainedCapacity must be greater than zero",
+            ));
+        }
 
         let watch = match args.pattern_type.as_str() {
             "text" => crate::watch::Watch::new_text_with_retention(
@@ -1187,7 +1193,11 @@ impl McpRuntimeState {
             watch_id
         };
 
-        Ok(CreateWatchResponse { watch_id, name })
+        Ok(CreateWatchResponse {
+            watch_id,
+            name,
+            retained_capacity: retention_capacity,
+        })
     }
 
     pub fn list_watches(&self, args: ListWatchesArgs) -> Result<ListWatchesResponse, McpToolError> {
@@ -2319,6 +2329,14 @@ fn create_watch_tool() -> Tool {
                 ),
                 ("tag", string_property("Optional tag substring filter. Only entries whose tag contains this value (case-insensitive) are matched.")),
                 ("minLevel", string_property("Minimum log level filter. Accepts verbose/debug/info/warn/error/fatal or single-letter aliases.")),
+                (
+                    "retainedCapacity",
+                    json!({
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional retained-match ring size for this watch. Defaults to a derived capacity based on the main capture buffer; increase it for noisy sessions when pinned matches still churn too quickly."
+                    }),
+                ),
             ],
             &["name", "pattern"],
         ),
@@ -2454,21 +2472,21 @@ async fn handle_restart_adb() -> Result<RestartAdbResponse, McpToolError> {
 
 async fn handle_set_location(args: SetLocationArgs) -> Result<SetLocationResponse, McpToolError> {
     let device = resolve_connected_device(args.device).await?;
-        let message = match device.platform {
-            DevicePlatform::IosSimulator => {
-                catpane_core::ios::set_simulator_location(&device.id, args.latitude, args.longitude)
-                    .await
-                    .map_err(McpToolError::internal)?
-            }
-            DevicePlatform::IosDevice => {
+    let message = match device.platform {
+        DevicePlatform::IosSimulator => {
+            catpane_core::ios::set_simulator_location(&device.id, args.latitude, args.longitude)
+                .await
+                .map_err(McpToolError::internal)?
+        }
+        DevicePlatform::IosDevice => {
+            return Err(McpToolError::invalid_params(format!(
+                "Location spoofing is only supported on iOS simulators, not physical device '{}'.",
+                device.id
+            )));
+        }
+        DevicePlatform::Android => {
+            if !catpane_core::adb::is_emulator(&device.id) {
                 return Err(McpToolError::invalid_params(format!(
-                    "Location spoofing is only supported on iOS simulators, not physical device '{}'.",
-                    device.id
-                )));
-            }
-            DevicePlatform::Android => {
-                if !catpane_core::adb::is_emulator(&device.id) {
-                    return Err(McpToolError::invalid_params(format!(
                     "Location spoofing is only supported on Android emulators, not physical device '{}'. Use a mock location app instead.",
                     device.id
                 )));
@@ -2509,9 +2527,7 @@ async fn handle_clear_location(
 async fn handle_set_network_condition(
     args: SetNetworkConditionArgs,
 ) -> Result<SetNetworkConditionResponse, McpToolError> {
-    let spec = args
-        .resolve_spec()
-        .map_err(McpToolError::invalid_params)?;
+    let spec = args.resolve_spec().map_err(McpToolError::invalid_params)?;
     let device = resolve_connected_device(args.device).await?;
     let message = match device.platform {
         DevicePlatform::IosSimulator => {
@@ -2540,11 +2556,11 @@ async fn handle_set_network_condition(
                 device.id
             )));
         }
-        DevicePlatform::Android => catpane_core::adb::apply_android_network_condition(
-            &device.id, spec,
-        )
-        .await
-        .map_err(McpToolError::internal)?,
+        DevicePlatform::Android => {
+            catpane_core::adb::apply_android_network_condition(&device.id, spec)
+                .await
+                .map_err(McpToolError::internal)?
+        }
     };
     Ok(SetNetworkConditionResponse { message })
 }
@@ -2835,7 +2851,10 @@ fn duration_as_millis(duration: Duration) -> u64 {
 }
 
 fn idle_timeout_reason(timeout: Duration) -> String {
-    format!("{IDLE_TIMEOUT_REASON_PREFIX} ({})", format_duration(timeout))
+    format!(
+        "{IDLE_TIMEOUT_REASON_PREFIX} ({})",
+        format_duration(timeout)
+    )
 }
 
 fn capture_warnings(
@@ -2853,7 +2872,10 @@ fn capture_warnings(
     } else {
         buffer.len.saturating_mul(100) / buffer.capacity
     };
-    let ios_capture = matches!(platform, DevicePlatform::IosDevice | DevicePlatform::IosSimulator);
+    let ios_capture = matches!(
+        platform,
+        DevicePlatform::IosDevice | DevicePlatform::IosSimulator
+    );
     let explicitly_scoped = scope.is_explicitly_scoped();
 
     if buffer.dropped > 0 {
@@ -2876,7 +2898,10 @@ fn capture_warnings(
         );
     }
 
-    if running && matches!(platform, DevicePlatform::IosDevice) && let Some(timeout) = idle_timeout {
+    if running
+        && matches!(platform, DevicePlatform::IosDevice)
+        && let Some(timeout) = idle_timeout
+    {
         let idle_ms = now_epoch_ms().saturating_sub(last_activity_at_ms);
         let timeout_ms = duration_as_millis(timeout);
         if idle_ms >= timeout_ms.saturating_mul(3) / 4 {
@@ -2897,7 +2922,7 @@ fn capture_warnings(
 
     if retained_matches.retained_dropped > 0 {
         warnings.push(format!(
-            "Retained watch matches have also started evicting older entries ({} dropped). Narrow the watch or clear logs before the next reproduction.",
+            "Retained watch matches have also started evicting older entries ({} dropped). Narrow the watch, raise retainedCapacity on create_watch, or clear logs before the next reproduction.",
             retained_matches.retained_dropped
         ));
     }
@@ -3259,8 +3284,83 @@ mod tests {
             now_epoch_ms(),
         );
 
-        assert!(warnings.iter().any(|warning| warning.contains("unscoped iOS capture")));
-        assert!(warnings.iter().any(|warning| warning.contains("No watches are active")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("unscoped iOS capture"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("No watches are active"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_watch_uses_requested_retained_capacity() {
+        let device = connected_device("device-watch");
+        let state = McpRuntimeState::with_buffer_capacity(32);
+        {
+            let mut inner = lock_recover(&state.inner);
+            inner.captures.insert(
+                "capture-watch".to_owned(),
+                capture_runtime("capture-watch", &device),
+            );
+        }
+
+        let response = state
+            .create_watch(CreateWatchArgs {
+                capture_id: Some("capture-watch".into()),
+                device: None,
+                name: "important-lines".into(),
+                pattern: "timeout".into(),
+                pattern_type: "text".into(),
+                tag: None,
+                min_level: None,
+                retained_capacity: Some(777),
+            })
+            .unwrap();
+
+        assert_eq!(response.retained_capacity, 777);
+
+        let inner = lock_recover(&state.inner);
+        let capture = inner.captures.get("capture-watch").unwrap();
+        let watches = lock_recover(&capture.shared.watches);
+        let retained_capacity = watches
+            .get(&response.watch_id)
+            .unwrap()
+            .summary()
+            .retained_capacity;
+        assert_eq!(retained_capacity, 777);
+    }
+
+    #[tokio::test]
+    async fn create_watch_rejects_zero_retained_capacity() {
+        let device = connected_device("device-watch-zero");
+        let state = McpRuntimeState::with_buffer_capacity(32);
+        {
+            let mut inner = lock_recover(&state.inner);
+            inner.captures.insert(
+                "capture-watch-zero".to_owned(),
+                capture_runtime("capture-watch-zero", &device),
+            );
+        }
+
+        let err = state
+            .create_watch(CreateWatchArgs {
+                capture_id: Some("capture-watch-zero".into()),
+                device: None,
+                name: "important-lines".into(),
+                pattern: "timeout".into(),
+                pattern_type: "text".into(),
+                tag: None,
+                min_level: None,
+                retained_capacity: Some(0),
+            })
+            .unwrap_err();
+
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("retainedCapacity"));
     }
 
     #[test]
@@ -3289,7 +3389,10 @@ mod tests {
             }),
         };
         let spec = args.resolve_spec().unwrap();
-        assert!(matches!(spec, catpane_core::NetworkConditionSpec::Custom { .. }));
+        assert!(matches!(
+            spec,
+            catpane_core::NetworkConditionSpec::Custom { .. }
+        ));
     }
 
     #[test]

@@ -10,7 +10,9 @@ pub mod log_entry;
 pub mod network_condition;
 pub mod throttle_android;
 
-pub use capture::{CaptureController, CaptureHandle, CaptureScope, ConnectedDevice, DevicePlatform};
+pub use capture::{
+    CaptureController, CaptureHandle, CaptureScope, ConnectedDevice, DevicePlatform,
+};
 pub use crash_detector::{CrashDetector, CrashReport, CrashType, detect_crashes};
 pub use filter::{Filter, TagFilter, TagLevelMatcher};
 pub use ios::IosSimulator;

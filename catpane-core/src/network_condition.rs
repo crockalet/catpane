@@ -177,9 +177,7 @@ impl CustomNetworkParams {
         if let Some(loss) = self.loss_pct
             && !(0.0..=100.0).contains(&loss)
         {
-            return Err(format!(
-                "loss_pct must be in 0.0..=100.0 (got {loss})"
-            ));
+            return Err(format!("loss_pct must be in 0.0..=100.0 (got {loss})"));
         }
         if let Some(loss) = self.loss_pct
             && !loss.is_finite()
@@ -344,16 +342,16 @@ mod tests {
 
     #[test]
     fn spec_is_unthrottled() {
-        assert!(
-            NetworkConditionSpec::preset(NetworkConditionPreset::Unthrottled).is_unthrottled()
-        );
+        assert!(NetworkConditionSpec::preset(NetworkConditionPreset::Unthrottled).is_unthrottled());
         assert!(!NetworkConditionSpec::preset(NetworkConditionPreset::Edge).is_unthrottled());
         assert!(NetworkConditionSpec::custom(CustomNetworkParams::default()).is_unthrottled());
-        assert!(!NetworkConditionSpec::custom(CustomNetworkParams {
-            delay_ms: Some(10),
-            ..Default::default()
-        })
-        .is_unthrottled());
+        assert!(
+            !NetworkConditionSpec::custom(CustomNetworkParams {
+                delay_ms: Some(10),
+                ..Default::default()
+            })
+            .is_unthrottled()
+        );
     }
 
     #[test]

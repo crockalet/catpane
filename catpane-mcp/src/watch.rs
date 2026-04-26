@@ -370,7 +370,12 @@ mod tests {
         }
     }
 
-    fn make_buffered_entry(seq: u64, level: LogLevel, tag: &str, message: &str) -> BufferedLogEntry {
+    fn make_buffered_entry(
+        seq: u64,
+        level: LogLevel,
+        tag: &str,
+        message: &str,
+    ) -> BufferedLogEntry {
         BufferedLogEntry {
             seq,
             normalized_timestamp: None,
@@ -443,7 +448,10 @@ mod tests {
         assert!(w.retain_if_match(&make_buffered_entry(3, LogLevel::Info, "A", "hit three")));
 
         let retained = w.retained_matches_since(None, 10);
-        assert_eq!(retained.iter().map(|entry| entry.seq).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(
+            retained.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
         assert_eq!(w.summary().retained_dropped, 1);
     }
 

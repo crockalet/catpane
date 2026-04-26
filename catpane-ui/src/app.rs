@@ -86,7 +86,10 @@ impl CustomNetworkForm {
                 .downlink_kbps
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-            uplink_kbps: params.uplink_kbps.map(|v| v.to_string()).unwrap_or_default(),
+            uplink_kbps: params
+                .uplink_kbps
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -537,12 +540,8 @@ impl App {
             return false;
         };
 
-        let mut handle = capture::spawn_capture(
-            &self.rt,
-            &device,
-            None,
-            capture::CaptureScope::default(),
-        );
+        let mut handle =
+            capture::spawn_capture(&self.rt, &device, None, capture::CaptureScope::default());
         let controller = handle.controller();
         let (tx, _) = broadcast::channel::<LogEntry>(4096);
         let fanout_tx = tx.clone();

@@ -339,7 +339,8 @@ mod tests {
     #[test]
     fn parses_ios_syslog_lines() {
         // Old syslog_relay format (with hostname)
-        let line = "Apr 16 12:11:32 iPhone SpringBoard[58] <Notice>: Application launched successfully";
+        let line =
+            "Apr 16 12:11:32 iPhone SpringBoard[58] <Notice>: Application launched successfully";
         let entry = parse_ios_syslog_line(line).unwrap();
         assert_eq!(entry.platform, LogPlatform::Ios);
         assert_eq!(entry.timestamp, "04-16 12:11:32.000");
@@ -370,7 +371,10 @@ mod tests {
         let entry = parse_ios_syslog_line(line).unwrap();
         assert_eq!(entry.pid, Some(35));
         assert_eq!(entry.tag, "SpringBoard(CoreFoundation)");
-        assert_eq!(entry.process.as_deref(), Some("SpringBoard(CoreFoundation)"));
+        assert_eq!(
+            entry.process.as_deref(),
+            Some("SpringBoard(CoreFoundation)")
+        );
         assert_eq!(entry.message, "Bundle: value");
     }
 }

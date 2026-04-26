@@ -50,6 +50,7 @@ Supporting docs:
    - Call `clear_logs` to reset the main buffer and any retained watch matches.
 4. **Create a pinned watch for the important signal.**
    - Call `create_watch` for the app process, subsystem, or key error text before reproducing.
+   - If pinned matches still churn too quickly, raise `retainedCapacity` on that watch for the session.
    - Poll `get_watch_matches` during the session; retained matches survive main-buffer overflow.
 5. **Check crashes early.**
    - Call `get_crashes` after reproduction to surface structured crash reports without paging raw logs first.
@@ -73,6 +74,7 @@ Supporting docs:
 - Always prefer `captureId` or `device` once more than one capture exists. Unqualified calls only auto-resolve when exactly one capture is registered.
 - `get_logs` reads the main in-memory ring buffer for a capture. Older entries can age out when the buffer reaches capacity.
 - `create_watch` + `get_watch_matches` give you a second retained path for relevant lines; use that for long or noisy iOS sessions.
+- `create_watch.retainedCapacity` lets you enlarge that pinned buffer without inflating the main capture buffer.
 - `cursor` is exclusive:
   - `order: "desc"` returns older entries with `seq < cursor`
   - `order: "asc"` returns newer entries with `seq > cursor`
@@ -113,7 +115,8 @@ Supporting docs:
   "name": "app-errors",
   "pattern": "timeout",
   "minLevel": "error",
-  "tag": "MyApp"
+  "tag": "MyApp",
+  "retainedCapacity": 20000
 }
 ```
 

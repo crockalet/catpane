@@ -410,7 +410,15 @@ pub async fn launch_helper_for_permission(serial: &str) -> Result<(), String> {
     let component = format!("{HELPER_PACKAGE}/.MainActivity");
     let out = tokio::process::Command::new(adb_binary())
         .args([
-            "-s", serial, "shell", "am", "start", "-n", &component, "--es", "reason",
+            "-s",
+            serial,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            &component,
+            "--es",
+            "reason",
             "request_vpn_permission",
         ])
         .output()
@@ -455,9 +463,7 @@ pub async fn apply_with_transport<T: ControlTransport>(
     serial: &str,
     spec: NetworkConditionSpec,
 ) -> Result<String, String> {
-    let resp = transport
-        .round_trip(ControlRequest::Apply { spec })
-        .await?;
+    let resp = transport.round_trip(ControlRequest::Apply { spec }).await?;
     interpret_response(resp, serial, "Applied network condition")
 }
 
@@ -551,10 +557,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ControlTransport for ScriptedTransport {
-        async fn round_trip(
-            &self,
-            request: ControlRequest,
-        ) -> Result<ControlResponse, String> {
+        async fn round_trip(&self, request: ControlRequest) -> Result<ControlResponse, String> {
             self.sent.lock().await.push(request);
             let mut responses = self.responses.lock().await;
             if responses.is_empty() {
@@ -692,16 +695,19 @@ mod tests {
             loss_pct: Some(150.0),
             ..Default::default()
         });
-        let err = apply_device_network_condition("device", bad).await.unwrap_err();
+        let err = apply_device_network_condition("device", bad)
+            .await
+            .unwrap_err();
         assert!(err.contains("loss_pct"));
     }
 
     #[tokio::test]
     async fn clear_with_transport_synthesizes_message_when_helper_silent() {
-        let transport = ScriptedTransport::new(vec![ControlResponse::ok_with(
-            HelperStatus::default(),
-        )]);
-        let result = clear_with_transport(&transport, "abc-serial").await.unwrap();
+        let transport =
+            ScriptedTransport::new(vec![ControlResponse::ok_with(HelperStatus::default())]);
+        let result = clear_with_transport(&transport, "abc-serial")
+            .await
+            .unwrap();
         assert!(result.contains("abc-serial"));
         assert!(result.starts_with("Cleared"));
     }
@@ -735,10 +741,8 @@ mod tests {
     // -- tiny test helpers ------------------------------------------------
 
     fn tempdir_or_skip() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "catpane-throttle-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("catpane-throttle-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }

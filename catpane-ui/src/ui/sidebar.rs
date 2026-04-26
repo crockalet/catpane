@@ -2,8 +2,8 @@ use egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 
 use super::theme::*;
 use crate::app::{
-    App, CustomNetworkForm, DeviceLocationState, DeviceNetworkState, QrPairStatus,
-    QrPairingState, SavedLocation, SidebarTab,
+    App, CustomNetworkForm, DeviceLocationState, DeviceNetworkState, QrPairStatus, QrPairingState,
+    SavedLocation, SidebarTab,
 };
 use crate::pane::WATCH_COLORS;
 use catpane_core::capture::{ConnectedDevice, DevicePlatform};
@@ -177,11 +177,7 @@ fn draw_sidebar_rail(ui: &mut Ui, app: &mut App, sidebar_open: bool) {
             egui_phosphor::regular::MAP_PIN,
             "Location",
         ),
-        (
-            SidebarTab::Network,
-            egui_phosphor::regular::GEAR,
-            "Network",
-        ),
+        (SidebarTab::Network, egui_phosphor::regular::GEAR, "Network"),
         (
             SidebarTab::Crashes,
             egui_phosphor::regular::WARNING_CIRCLE,
@@ -1190,18 +1186,20 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
         .and_then(|device_id| app.devices.iter().find(|d| d.id == *device_id))
         .cloned();
 
-    let is_android_emulator = focused_device
-        .as_ref()
-        .is_some_and(|d| d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id));
-    let is_android_physical = focused_device
-        .as_ref()
-        .is_some_and(|d| d.platform == DevicePlatform::Android && !catpane_core::adb::is_emulator(&d.id));
+    let is_android_emulator = focused_device.as_ref().is_some_and(|d| {
+        d.platform == DevicePlatform::Android && catpane_core::adb::is_emulator(&d.id)
+    });
+    let is_android_physical = focused_device.as_ref().is_some_and(|d| {
+        d.platform == DevicePlatform::Android && !catpane_core::adb::is_emulator(&d.id)
+    });
 
     let device_hint = match &focused_device {
         Some(d) if d.platform == DevicePlatform::IosSimulator && ios_feature_enabled => {
             "iOS Simulator"
         }
-        Some(d) if d.platform == DevicePlatform::IosSimulator => "iOS Simulator (feature-flagged off)",
+        Some(d) if d.platform == DevicePlatform::IosSimulator => {
+            "iOS Simulator (feature-flagged off)"
+        }
         Some(d) if d.platform == DevicePlatform::IosDevice => "iOS Device (not supported)",
         Some(_) if is_android_emulator => "Android Emulator",
         Some(_) if is_android_physical => "Android (physical – via CatPane helper app)",
@@ -1300,7 +1298,11 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
     // ─── Custom form (physical Android only) ──────────────────────────────
     if network_state.custom_selected && is_android_physical {
         ui.add_space(4.0);
-        ui.label(RichText::new("Leave blank to leave a dimension uncapped.").weak().size(11.0));
+        ui.label(
+            RichText::new("Leave blank to leave a dimension uncapped.")
+                .weak()
+                .size(11.0),
+        );
         egui::Grid::new("network_custom_grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
@@ -1343,16 +1345,15 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
 
     // Resolve the spec the user has on screen; if Custom and parsing fails,
     // surface the error inline and disable Apply.
-    let resolved_spec: Result<NetworkConditionSpec, String> = if network_state.custom_selected
-        && is_android_physical
-    {
-        network_state
-            .custom_form
-            .to_params()
-            .map(NetworkConditionSpec::custom)
-    } else {
-        Ok(network_state.spec)
-    };
+    let resolved_spec: Result<NetworkConditionSpec, String> =
+        if network_state.custom_selected && is_android_physical {
+            network_state
+                .custom_form
+                .to_params()
+                .map(NetworkConditionSpec::custom)
+        } else {
+            Ok(network_state.spec)
+        };
     let spec_for_apply = resolved_spec.clone().ok();
 
     ui.horizontal(|ui| {
@@ -1379,10 +1380,8 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
                 let result = match platform {
                     DevicePlatform::IosSimulator => match spec {
                         NetworkConditionSpec::Preset { preset } => {
-                            catpane_core::ios::set_simulator_network_condition(
-                                &device_id, preset,
-                            )
-                            .await
+                            catpane_core::ios::set_simulator_network_condition(&device_id, preset)
+                                .await
                         }
                         NetworkConditionSpec::Custom { .. } => Err(
                             "Custom shaping is not supported on the iOS Simulator. Pick a preset."
@@ -1390,12 +1389,10 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
                         ),
                     },
                     DevicePlatform::IosDevice => Err(
-                        "Network throttling is not supported on physical iOS devices."
-                            .to_string(),
+                        "Network throttling is not supported on physical iOS devices.".to_string(),
                     ),
                     DevicePlatform::Android => {
-                        catpane_core::adb::apply_android_network_condition(&device_id, spec)
-                            .await
+                        catpane_core::adb::apply_android_network_condition(&device_id, spec).await
                     }
                 };
                 let _ = tx.send(result).await;
@@ -1420,8 +1417,7 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
                         catpane_core::ios::clear_simulator_network_condition(&device_id).await
                     }
                     DevicePlatform::IosDevice => Err(
-                        "Network throttling is not supported on physical iOS devices."
-                            .to_string(),
+                        "Network throttling is not supported on physical iOS devices.".to_string(),
                     ),
                     DevicePlatform::Android => {
                         catpane_core::adb::clear_android_network_condition(&device_id).await
@@ -1431,7 +1427,8 @@ fn draw_network_tab(ui: &mut Ui, app: &mut App) {
             });
         }
 
-        if status.is_some() && ui.small_button(egui_phosphor::regular::CROSS).clicked()
+        if status.is_some()
+            && ui.small_button(egui_phosphor::regular::CROSS).clicked()
             && let Some(state) = app.device_networks.get_mut(&dev_id)
         {
             state.status = None;

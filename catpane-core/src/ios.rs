@@ -323,11 +323,7 @@ pub async fn clear_simulator_network_condition(udid: &str) -> Result<String, Str
         return Err(ios_network_throttling_gate_message());
     }
     run_network_controller(
-        [
-            "clear".to_string(),
-            "--udid".to_string(),
-            udid.to_string(),
-        ],
+        ["clear".to_string(), "--udid".to_string(), udid.to_string()],
         "clearing iOS Simulator network throttling",
         format!("Cleared network throttling on {}", udid),
     )
