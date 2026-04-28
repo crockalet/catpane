@@ -16,7 +16,7 @@ use crate::tools::{
     IDLE_CAPTURE_REAPER_INTERVAL, McpRuntimeState, handle_tool_call, tool_definitions,
 };
 
-const MCP_WORKFLOW_INSTRUCTIONS: &str = "For iOS debugging, avoid broad unscoped captures when possible. Start with get_status, then prefer start_capture with explicit device plus process/text/predicate scope, call clear_logs before a fresh reproduction, and create_watch for the app process or error text so relevant lines survive main-buffer overflow. When pinned matches still churn too quickly, raise create_watch.retainedCapacity for that session. Use get_watch_matches for high-signal polling, get_crashes for structured crash checks, and small filtered get_logs calls for broader context.";
+const MCP_WORKFLOW_INSTRUCTIONS: &str = "For iOS debugging, avoid broad noisy captures when possible. Start with get_status, then prefer start_capture with explicit device plus process/text/predicate scope; iOS captures default to clean mode, and clean=false is the raw-stream escape hatch. Call clear_logs before a fresh reproduction, and create_watch for the app process or error text so relevant lines survive main-buffer overflow. When pinned matches still churn too quickly, raise create_watch.retainedCapacity for that session. Use get_watch_matches for high-signal polling, get_crashes for structured crash checks, and small filtered get_logs calls for broader context.";
 
 pub async fn run_stdio_server(rt: tokio::runtime::Handle) -> Result<(), String> {
     let stdin = BufReader::new(io::stdin());

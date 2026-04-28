@@ -8,6 +8,7 @@ use tokio::{
 
 use crate::{
     adb, ios, ios_device,
+    ios_noise::{IOS_SYSTEM_PROCESSES, IOS_SYSTEM_SUBSYSTEM_PREFIXES},
     log_buffer_config::initial_log_backlog,
     log_entry::{LogEntry, parse_ios_log_ndjson_line, parse_ios_syslog_line, parse_logcat_line},
 };
@@ -18,16 +19,28 @@ pub struct CaptureScope {
     pub text: Option<String>,
     pub predicate: Option<String>,
     pub quiet: bool,
+    pub clean: bool,
 }
 
 impl CaptureScope {
     pub fn is_empty(&self) -> bool {
-        self.process.is_none() && self.text.is_none() && self.predicate.is_none() && !self.quiet
+        self.process.is_none()
+            && self.text.is_none()
+            && self.predicate.is_none()
+            && !self.quiet
+            && !self.clean
     }
 
     pub fn is_explicitly_scoped(&self) -> bool {
         self.process.is_some() || self.text.is_some() || self.predicate.is_some()
     }
+}
+
+pub fn default_clean_capture(platform: DevicePlatform) -> bool {
+    matches!(
+        platform,
+        DevicePlatform::IosDevice | DevicePlatform::IosSimulator
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -516,6 +529,9 @@ fn build_ios_simulator_capture_args(udid: &str, scope: &CaptureScope) -> Vec<Str
 fn build_ios_simulator_predicate(scope: &CaptureScope) -> Option<String> {
     let mut clauses = Vec::new();
 
+    if scope.clean {
+        clauses.push(simulator_clean_predicate_clause());
+    }
     if (scope.text.is_some() || scope.predicate.is_some())
         && let Some(process) = scope.process.as_deref()
     {
@@ -537,7 +553,7 @@ fn build_ios_simulator_predicate(scope: &CaptureScope) -> Option<String> {
 fn build_ios_device_capture_args(udid: &str, scope: &CaptureScope) -> Vec<String> {
     let mut args = vec!["-u".to_string(), udid.to_string()];
 
-    if scope.quiet {
+    if scope.clean || scope.quiet {
         args.push("--quiet".to_string());
     }
     if let Some(process) = scope.process.as_deref() {
@@ -555,6 +571,21 @@ fn build_ios_device_capture_args(udid: &str, scope: &CaptureScope) -> Vec<String
 fn quote_predicate_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn simulator_clean_predicate_clause() -> String {
+    let process_clause = IOS_SYSTEM_PROCESSES
+        .iter()
+        .map(|process| format!("process == {}", quote_predicate_string(process)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let subsystem_clause = IOS_SYSTEM_SUBSYSTEM_PREFIXES
+        .iter()
+        .map(|prefix| format!("subsystem BEGINSWITH {}", quote_predicate_string(prefix)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    format!("NOT (({process_clause}) OR ({subsystem_clause}))")
 }
 
 struct CompletionSignal {
@@ -649,6 +680,29 @@ mod tests {
     }
 
     #[test]
+    fn simulator_clean_scope_builds_exclusion_predicate() {
+        let args = build_ios_simulator_capture_args(
+            "SIM-1",
+            &CaptureScope {
+                clean: true,
+                ..CaptureScope::default()
+            },
+        );
+
+        assert_eq!(
+            args[..9],
+            [
+                "simctl", "spawn", "SIM-1", "log", "stream", "--style", "ndjson", "--level",
+                "debug"
+            ]
+        );
+        assert_eq!(args[9], "--predicate");
+        assert!(args[10].contains("NOT (("));
+        assert!(args[10].contains("process == \"SpringBoard\""));
+        assert!(args[10].contains("subsystem BEGINSWITH \"com.apple.\""));
+    }
+
+    #[test]
     fn simulator_user_predicate_is_combined_with_generated_filters() {
         let args = build_ios_simulator_capture_args(
             "SIM-1",
@@ -674,6 +728,7 @@ mod tests {
                 text: Some("timeout".into()),
                 predicate: Some("ignored".into()),
                 quiet: true,
+                ..CaptureScope::default()
             },
         );
 
@@ -689,6 +744,19 @@ mod tests {
                 "timeout",
             ]
         );
+    }
+
+    #[test]
+    fn device_clean_scope_enables_quiet() {
+        let args = build_ios_device_capture_args(
+            "DEVICE-1",
+            &CaptureScope {
+                clean: true,
+                ..CaptureScope::default()
+            },
+        );
+
+        assert_eq!(args, vec!["-u", "DEVICE-1", "--quiet"]);
     }
 
     #[test]

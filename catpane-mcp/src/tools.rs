@@ -191,6 +191,8 @@ pub struct StartCaptureArgs {
     #[serde(default)]
     pub predicate: Option<String>,
     #[serde(default)]
+    pub clean: Option<bool>,
+    #[serde(default)]
     pub quiet: bool,
     #[serde(default)]
     pub restart: bool,
@@ -2060,6 +2062,13 @@ fn start_capture_tool() -> Tool {
                     ),
                 ),
                 (
+                    "clean",
+                    json!({
+                        "type": "boolean",
+                        "description": "Prefer a cleaner iOS stream. Defaults to true for iOS captures and false for Android. On iOS this enables quieter source-side capture and simulator-side system-noise suppression; pass false to keep the raw device stream."
+                    }),
+                ),
+                (
                     "quiet",
                     json!({
                         "type": "boolean",
@@ -2085,7 +2094,7 @@ fn start_capture_tool() -> Tool {
             &[],
         ),
     )
-    .with_description("Start a new Android or iOS capture. For iOS, prefer process/text/predicate scope up front so irrelevant logs never evict the useful ones. Physical iOS captures auto-stop after MCP inactivity (15m by default).")
+    .with_description("Start a new Android or iOS capture. iOS captures default to a cleaner source-scoped mode; pass clean=false if you need the raw device stream. Explicit process/text/predicate scope is still the best way to avoid irrelevant logs evicting useful ones. Physical iOS captures auto-stop after MCP inactivity (15m by default).")
 }
 
 fn stop_capture_tool() -> Tool {
@@ -2783,20 +2792,24 @@ fn resolve_capture_scope(
     device: &ConnectedDevice,
     args: &StartCaptureArgs,
 ) -> Result<CaptureScope, McpToolError> {
+    let clean = args
+        .clean
+        .unwrap_or(capture::default_clean_capture(device.platform));
     let scope = CaptureScope {
         process: normalize_optional_string(args.process.clone()),
         text: normalize_optional_string(args.text.clone()),
         predicate: normalize_optional_string(args.predicate.clone()),
         quiet: args.quiet,
+        clean,
     };
 
     match device.platform {
         DevicePlatform::Android => {
-            if scope.is_empty() {
+            if scope.is_empty() && args.clean.is_none() {
                 Ok(scope)
             } else {
                 Err(McpToolError::invalid_params(
-                    "process, text, predicate, and quiet are only supported for iOS captures",
+                    "process, text, predicate, clean, and quiet are only supported for iOS captures",
                 ))
             }
         }
@@ -2877,6 +2890,12 @@ fn capture_warnings(
         DevicePlatform::IosDevice | DevicePlatform::IosSimulator
     );
     let explicitly_scoped = scope.is_explicitly_scoped();
+
+    if ios_capture && !scope.clean && !explicitly_scoped {
+        warnings.push(
+            "Raw iOS capture is enabled without clean mode. Expect heavier system noise unless you restart with clean capture or add explicit process/text/predicate scope.".to_string(),
+        );
+    }
 
     if buffer.dropped > 0 {
         if ios_capture && !explicitly_scoped {
@@ -3239,6 +3258,27 @@ mod tests {
         let device = connected_device("android-1");
         let args = StartCaptureArgs {
             process: Some("MyApp".into()),
+            ..StartCaptureArgs::default()
+        };
+
+        let err = resolve_capture_scope(&device, &args).unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("only supported for iOS captures"));
+    }
+
+    #[test]
+    fn resolve_capture_scope_defaults_clean_for_ios() {
+        let device = ios_device("ios-clean", DevicePlatform::IosDevice);
+        let scope = resolve_capture_scope(&device, &StartCaptureArgs::default()).unwrap();
+
+        assert!(scope.clean);
+    }
+
+    #[test]
+    fn resolve_capture_scope_rejects_android_clean_flag() {
+        let device = connected_device("android-clean");
+        let args = StartCaptureArgs {
+            clean: Some(true),
             ..StartCaptureArgs::default()
         };
 

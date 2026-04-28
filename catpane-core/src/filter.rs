@@ -1,4 +1,7 @@
-use crate::log_entry::{LogEntry, LogLevel, LogPlatform};
+use crate::{
+    ios_noise::{is_ios_system_process, is_ios_system_subsystem},
+    log_entry::{LogEntry, LogLevel, LogPlatform},
+};
 use regex::Regex;
 
 #[derive(Debug, Clone)]
@@ -78,32 +81,6 @@ const VENDOR_TAGS: &[&str] = &[
     "traced_probes",
     "traced",
     "statsd",
-];
-
-const IOS_SYSTEM_SUBSYSTEM_PREFIXES: &[&str] = &[
-    "com.apple.",
-    "com.apple.CoreSimulator.",
-    "com.apple.WebKit.",
-];
-
-const IOS_SYSTEM_PROCESSES: &[&str] = &[
-    "SpringBoard",
-    "backboardd",
-    "assertiond",
-    "runningboardd",
-    "launchd",
-    "logd",
-    "installd",
-    "cfprefsd",
-    "networkd",
-    "nsurlsessiond",
-    "powerd",
-    "securityd",
-    "symptomsd",
-    "trustd",
-    "wifid",
-    "Simulator",
-    "SimulatorTrampoline",
 ];
 
 impl Default for Filter {
@@ -363,18 +340,6 @@ fn is_ios_device_log(entry: &LogEntry) -> bool {
         .is_some_and(is_ios_system_subsystem)
         || entry.process.as_deref().is_some_and(is_ios_system_process)
         || (entry.process.is_none() && entry.subsystem.is_none() && entry.tag == "iOS")
-}
-
-fn is_ios_system_subsystem(subsystem: &str) -> bool {
-    IOS_SYSTEM_SUBSYSTEM_PREFIXES
-        .iter()
-        .any(|prefix| subsystem.starts_with(prefix))
-}
-
-fn is_ios_system_process(process: &str) -> bool {
-    IOS_SYSTEM_PROCESSES
-        .iter()
-        .any(|candidate| process.eq_ignore_ascii_case(candidate))
 }
 
 #[cfg(test)]

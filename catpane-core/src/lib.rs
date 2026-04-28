@@ -5,6 +5,7 @@ pub mod crash_detector;
 pub mod filter;
 pub mod ios;
 pub mod ios_device;
+pub mod ios_noise;
 pub mod log_buffer_config;
 pub mod log_entry;
 pub mod network_condition;

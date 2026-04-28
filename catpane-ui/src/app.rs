@@ -236,6 +236,7 @@ pub struct App {
     pub saved_locations: Vec<SavedLocation>,
     pub location_pending: Option<(String, tokio::sync::mpsc::Receiver<Result<String, String>>)>,
     pub device_networks: HashMap<String, DeviceNetworkState>,
+    pub device_clean_capture: HashMap<String, bool>,
     pub network_pending: Option<(String, tokio::sync::mpsc::Receiver<Result<String, String>>)>,
     // Save location input
     pub save_location_name: String,
@@ -287,6 +288,7 @@ impl App {
             saved_locations: Self::load_saved_locations(),
             location_pending: None,
             device_networks: HashMap::new(),
+            device_clean_capture: HashMap::new(),
             network_pending: None,
             save_location_name: String::new(),
             expanded_crashes: std::collections::HashSet::new(),
@@ -518,6 +520,36 @@ impl App {
         }
     }
 
+    pub fn device_clean_capture_enabled(&self, device_id: &str) -> bool {
+        let Some(device) = self.devices.iter().find(|device| device.id == device_id) else {
+            return false;
+        };
+        if !device.supports_ios_filters() {
+            return false;
+        }
+        self.device_clean_capture
+            .get(device_id)
+            .copied()
+            .unwrap_or(capture::default_clean_capture(device.platform))
+    }
+
+    pub fn set_device_clean_capture_enabled(&mut self, device_id: String, enabled: bool) {
+        if !self
+            .devices
+            .iter()
+            .any(|device| device.id == device_id && device.supports_ios_filters())
+        {
+            return;
+        }
+
+        if self.device_clean_capture_enabled(&device_id) == enabled {
+            return;
+        }
+
+        self.device_clean_capture.insert(device_id.clone(), enabled);
+        self.restart_shared_capture(&device_id);
+    }
+
     fn ensure_shared_capture(&mut self, device_id: &str) -> bool {
         let should_recreate = self
             .shared_captures
@@ -541,7 +573,7 @@ impl App {
         };
 
         let mut handle =
-            capture::spawn_capture(&self.rt, &device, None, capture::CaptureScope::default());
+            capture::spawn_capture(&self.rt, &device, None, self.shared_capture_scope(&device));
         let controller = handle.controller();
         let (tx, _) = broadcast::channel::<LogEntry>(4096);
         let fanout_tx = tx.clone();
@@ -561,6 +593,40 @@ impl App {
             },
         );
         true
+    }
+
+    fn shared_capture_scope(&self, device: &ConnectedDevice) -> capture::CaptureScope {
+        if device.supports_ios_filters() {
+            capture::CaptureScope {
+                clean: self.device_clean_capture_enabled(&device.id),
+                ..capture::CaptureScope::default()
+            }
+        } else {
+            capture::CaptureScope::default()
+        }
+    }
+
+    fn restart_shared_capture(&mut self, device_id: &str) {
+        let pane_ids: Vec<_> = self
+            .panes
+            .iter()
+            .filter_map(|(pane_id, pane)| {
+                (pane.device.as_deref() == Some(device_id)).then_some(*pane_id)
+            })
+            .collect();
+
+        for pane_id in &pane_ids {
+            if let Some(pane) = self.panes.get_mut(pane_id) {
+                pane.clear();
+            }
+        }
+        for pane_id in &pane_ids {
+            self.detach_pane_capture(*pane_id);
+        }
+        self.remove_shared_capture(device_id);
+        for pane_id in pane_ids {
+            self.ensure_pane_capture(pane_id);
+        }
     }
 
     fn detach_pane_capture(&mut self, pane_id: PaneId) {
@@ -794,6 +860,7 @@ impl App {
             saved_locations: Self::load_saved_locations(),
             location_pending: None,
             device_networks: HashMap::new(),
+            device_clean_capture: HashMap::new(),
             network_pending: None,
             save_location_name: String::new(),
             expanded_crashes: std::collections::HashSet::new(),

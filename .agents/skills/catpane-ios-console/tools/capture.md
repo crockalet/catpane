@@ -11,6 +11,7 @@ Use `start_capture` to begin buffering iOS logs for later `get_logs`, `get_crash
 - `process` — iOS source-side process scope
 - `text` — iOS source-side message scope
 - `predicate` — additional simulator NSPredicate scope
+- `clean` — prefer the cleaner iOS source-side stream; pass `false` for raw capture
 - `quiet` — physical-iOS quiet mode via `idevicesyslog --quiet`
 - `restart` — replace an existing capture for the same device or simulator
 
@@ -34,6 +35,15 @@ Use `start_capture` to begin buffering iOS logs for later `get_logs`, `get_crash
 }
 ```
 
+### Example: capture the raw iOS stream
+
+```json
+{
+  "device": "iPhone 16 Pro",
+  "clean": false
+}
+```
+
 ### Example: replace an existing capture
 
 ```json
@@ -48,6 +58,7 @@ Use `start_capture` to begin buffering iOS logs for later `get_logs`, `get_crash
 - If `device` is omitted, auto-selection only works when exactly one capture target is available.
 - `package` and `pid` are not supported for iOS captures.
 - `predicate` is only supported for simulator captures.
+- `clean` defaults to `true` for iOS captures; use `clean: false` when you need the raw device stream.
 - Prefer source scoping over large unfiltered captures; source scoping protects the main buffer from irrelevant lines.
 - If a capture is already running for the same target and `restart` is not `true`, the tool can fail with a conflict.
 - `capacity` is the per-capture ring-buffer size; older logs fall out when the buffer fills.

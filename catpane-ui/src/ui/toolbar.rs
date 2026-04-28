@@ -3,12 +3,14 @@ use egui::{self, Key, RichText, ScrollArea, Ui};
 use super::theme::*;
 use crate::app::App;
 use crate::pane::PaneId;
+use catpane_core::capture;
 use catpane_core::log_entry::LogLevel;
 
 pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
     let is_dark = ui.visuals().dark_mode;
     let toolbar_bg = if is_dark { OD_BG_LIGHT } else { OL_BG_LIGHT };
     let mut pending_device_selection: Option<String> = None;
+    let mut pending_capture_clean_toggle: Option<(String, bool)> = None;
 
     let toolbar_frame = egui::Frame::new()
         .fill(toolbar_bg)
@@ -237,6 +239,37 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
                 if process_resp.changed() || subsystem_resp.changed() || category_resp.changed() {
                     pane.apply_ios_filters();
                 }
+
+                let clean_enabled = selected_device.as_ref().is_some_and(|device| {
+                    app.device_clean_capture
+                        .get(&device.id)
+                        .copied()
+                        .unwrap_or(capture::default_clean_capture(device.platform))
+                });
+                let clean_color = if clean_enabled {
+                    if is_dark { OD_CYAN } else { OL_BLUE }
+                } else if is_dark {
+                    OD_FG_DIM
+                } else {
+                    OL_FG_DIM
+                };
+                if ui
+                    .add(egui::Button::new(
+                        RichText::new(if clean_enabled { "Clean" } else { "Raw" })
+                            .size(11.0)
+                            .color(clean_color),
+                    ))
+                    .on_hover_text(if clean_enabled {
+                        "Device-wide iOS clean capture is on. This prefers quieter source-side capture and simulator system-noise suppression. Click to switch this device back to the raw stream."
+                    } else {
+                        "Device-wide raw iOS capture is on. Click to re-enable the cleaner source-scoped capture mode for this device."
+                    })
+                    .clicked()
+                {
+                    if let Some(device) = &selected_device {
+                        pending_capture_clean_toggle = Some((device.id.clone(), !clean_enabled));
+                    }
+                }
             }
 
             ui.separator();
@@ -368,6 +401,9 @@ pub fn draw_toolbar(ui: &mut Ui, app: &mut App, pane_id: PaneId) {
 
     if let Some(device_id) = pending_device_selection {
         app.set_pane_device(pane_id, Some(device_id));
+    }
+    if let Some((device_id, enabled)) = pending_capture_clean_toggle {
+        app.set_device_clean_capture_enabled(device_id, enabled);
     }
 }
 

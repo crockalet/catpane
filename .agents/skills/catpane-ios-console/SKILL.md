@@ -43,8 +43,8 @@ Supporting docs:
    - Both calls can include Android devices too, so filter to `platform: "iOS"` for this skill.
 2. **Start capture only when needed, and scope it early.**
    - Call `start_capture` with `device` when more than one capture target is available.
+   - iOS captures default to the cleaner source-side mode; pass `clean: false` only when you explicitly want the raw device stream.
    - For iOS, prefer `process`, `text`, and simulator `predicate` scope so irrelevant lines never enter the main buffer.
-   - Use `quiet: true` on physical iOS captures when you need a lighter default stream.
    - Use `restart: true` only when replacing an existing capture on the same target.
 3. **Clear logs before a fresh reproduction.**
    - Call `clear_logs` to reset the main buffer and any retained watch matches.
@@ -73,6 +73,7 @@ Supporting docs:
 
 - Always prefer `captureId` or `device` once more than one capture exists. Unqualified calls only auto-resolve when exactly one capture is registered.
 - `get_logs` reads the main in-memory ring buffer for a capture. Older entries can age out when the buffer reaches capacity.
+- `start_capture.clean` defaults to `true` for iOS captures and acts as the top-level raw-vs-clean escape hatch.
 - `create_watch` + `get_watch_matches` give you a second retained path for relevant lines; use that for long or noisy iOS sessions.
 - `create_watch.retainedCapacity` lets you enlarge that pinned buffer without inflating the main capture buffer.
 - `cursor` is exclusive:
